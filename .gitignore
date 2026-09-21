@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# generated pipeline outputs (reproducible: python -m tools.build_connectome)
+data/flywire/extracted/
+data/flywire/processed/connectome_graph.npz
+data/flywire/processed/neurons.sqlite
+
+# if someone drops the multi-GB official zip in locally
+data/flywire/raw/fafb.zip
+
+# local tooling
+.DS_Store

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FlyWire Fruit-Fly Simulation — FAFB v783</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">🪰 FlyWire Fruit-Fly Simulation <span class="v">FAFB v783</span></div>
+  <div id="databadge" class="badge">loading connectome…</div>
+  <nav>
+    <button id="mode-normal" class="mode active">🌍 NORMAL VIEW</button>
+    <button id="mode-neural" class="mode">🧠 NEURAL VIEW</button>
+    <button id="btn-pause">⏯ pause</button>
+    <button id="btn-reset">↻ reset</button>
+    <a class="src" href="https://codex.flywire.ai/api/download?dataset=fafb" target="_blank" rel="noopener">data source ↗</a>
+  </nav>
+</header>
+
+<main>
+  <section id="stage">
+    <div id="canvas-wrap"></div>
+    <div id="hud">
+      <div id="view-label">NORMAL VIEW — the fly in its world</div>
+    </div>
+  </section>
+
+  <aside id="panel">
+    <div class="tabs">
+      <button class="tab active" data-tab="telemetry">Telemetry</button>
+      <button class="tab" data-tab="neuron">Neuron</button>
+      <button class="tab" data-tab="trace">Trace &amp; Experiments</button>
+      <button class="tab" data-tab="legend">Real vs Approx</button>
+    </div>
+
+    <div class="tabpage" id="tab-telemetry">
+      <div id="telemetry"></div>
+      <h3>Motor pools (real DNs)</h3><div id="pools"></div>
+      <h3>Sensory levels</h3><div id="levels"></div>
+      <h3>Events</h3><div id="events"></div>
+      <h3>Controls</h3>
+      <div class="ctl">
+        <button id="btn-flash">⚡ light flash</button>
+        <button id="btn-light">💡 toggle light</button>
+        <button id="btn-sugar">🍬 drop sugar here</button>
+        <button id="btn-bitter">🤢 drop bitter here</button>
+        <button id="btn-clear">🧹 clear sources</button>
+      </div>
+      <label class="slider">hunger <input id="hunger" type="range" min="0" max="1" step="0.01" value="0.5"></label>
+    </div>
+
+    <div class="tabpage hidden" id="tab-neuron">
+      <div id="neuron-info"><p class="dim">In NEURAL VIEW, click a neuron to inspect it.<br><br>…or search:</p></div>
+      <div class="searchrow">
+        <input id="neuron-search" placeholder="cell type (e.g. DNa02, T4b) or root id">
+        <button id="neuron-search-btn">find</button>
+      </div>
+      <div id="search-results"></div>
+    </div>
+
+    <div class="tabpage hidden" id="tab-trace">
+      <h3>Signal tracing through the real connectome</h3>
+      <p class="dim">Follow activity downstream through actual v783 edges (ranked by synapse count).</p>
+      <div class="ctl">
+        <button class="trace-preset" data-kind="light">💡 light → eye → …</button>
+        <button class="trace-preset" data-kind="sugar">🍬 sugar taste → …</button>
+        <button class="trace-preset" data-kind="bitter">🤢 bitter → escape</button>
+        <button class="trace-preset" data-kind="walk">🚶 DNa02 → forward walk</button>
+      </div>
+      <div class="searchrow">
+        <input id="trace-seed" placeholder="or root id…">
+        <input id="trace-depth" type="number" value="3" min="1" max="5" style="width:52px" title="depth">
+        <button id="trace-run">trace</button>
+      </div>
+      <div id="trace-info"></div>
+      <button id="trace-anim">▶ animate signal</button>
+      <h3>Stimulate</h3>
+      <div class="searchrow">
+        <input id="stim-root" placeholder="root id">
+        <button id="stim-btn">+30 mV</button>
+      </div>
+      <h3>Presence</h3>
+      <div class="searchrow">
+        <input id="tp-x" placeholder="x mm" style="width:64px">
+        <input id="tp-y" placeholder="y mm" style="width:64px">
+        <button id="tp-btn">teleport fly</button>
+      </div>
+    </div>
+
+    <div class="tabpage hidden" id="tab-legend">
+      <h3>REAL FLYWIRE DATA</h3>
+      <ul class="real">
+        <li>neuron identities — 139,255 v783 root IDs</li>
+        <li>connectivity — 3,732,460 neuron pairs</li>
+        <li>synapse counts per connection (50.7M synapses)</li>
+        <li>neurotransmitter predictions (sign of each edge)</li>
+        <li>cell types, hemilineages, super-classes, sides, nerves</li>
+        <li>soma / node 3D positions (814 × 392 × 278 µm brain)</li>
+        <li>sensory &amp; descending populations (visual, olfactory, gustatory,
+            mechanosensory, DNa02, MDN, DNp15, DNg42, …)</li>
+      </ul>
+      <h3>SIMULATION APPROXIMATION</h3>
+      <ul class="apx">
+        <li>membrane dynamics (leaky integrate-and-fire, no measured params)</li>
+        <li>sensory transduction (linear encoders onto real afferents)</li>
+        <li>spontaneous background receptor firing</li>
+        <li>hunger gate, loom-alert drive onto flight DNs</li>
+        <li>flight feedback sustaining (visual-flow loop is closed through the net)</li>
+        <li>muscle / body mechanics (kinematic body, procedural gait)</li>
+        <li>odor field, light field, arena geometry</li>
+      </ul>
+      <p class="dim" style="font-size:10px">Data: FlyWire FAFB v783, Princeton Neuroscience Institute.
+      CC BY-NC-SA 4.0. Source: codex.flywire.ai</p>
+    </div>
+  </aside>
+</main>
+
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
