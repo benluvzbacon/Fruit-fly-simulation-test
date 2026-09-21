@@ -25,7 +25,8 @@ from .connectome import Connectome
 
 
 class LIFNetwork:
-    DT_MS = 1.0
+    DT_MS = 2.0           # 2 ms substeps: halves compute per simulated second;
+                          # tau_m/tau_syn stay ≥ 2× dt so dynamics are stable
     MV_PER_UNIT = 3.4     # mV per unit of (normalised synaptic + injected) current
 
     def __init__(self, con: Connectome, seed: int = 7):
@@ -38,7 +39,7 @@ class LIFNetwork:
         self.v_reset = -70.0
         self.v_thresh = -45.0
         self.tau_m = 20.0               # ms
-        self.refrac_steps = 2           # ms
+        self.refrac_steps = 1           # × dt = 2 ms absolute refractory
         self.refr_counter = np.zeros(N, dtype=np.int8)
         # per-synapse efficacy: compress synapse count, keep sign
         self.eff_out = np.sign(con.out_w) * np.power(
@@ -114,7 +115,7 @@ class LIFNetwork:
         self.refr_counter[self.spikes] = self.refrac_steps
         if refr.any():
             self.refr_counter[refr] -= 1
-        self.rate = (self.rate * 0.94 + self.spikes.astype(np.float32) * 0.06
+        self.rate = (self.rate * 0.88 + self.spikes.astype(np.float32) * 0.12
                      ).astype(np.float32)
         return self.spikes
 

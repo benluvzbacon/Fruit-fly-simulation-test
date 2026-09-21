@@ -2,7 +2,7 @@
 
     ENVIRONMENT → SENSORY INPUT → FLYWIRE NETWORK → MOTOR OUTPUT → BODY → WORLD
 
-Every brain step is a 1 ms LIF update over the REAL FlyWire graph.  The only
+Every brain step is a 2 ms LIF substep over the REAL FlyWire graph.  The only
 non-connectome parts are the boundary transducers (sensory encoding) and the
 effector mapping (DN population decoding), both documented as approximations.
 """
@@ -30,7 +30,7 @@ class Simulation:
     MOTIV_LIGHT_FORWARD = 0.8  # mild phototaxis onto forward pool
     MOTIV_TURN = 26.0      # bilateral imbalance → turn-pool steering
                        # (calibrated vs decoder: 8+ units for a real turn)
-    MOTIV_WANDER = 6.0     # spontaneous search-pattern wobble
+    MOTIV_WANDER = 6.0     # scale of the stochastic (OU) search meander
 
     def __init__(self, seed: int = 7):
         t0 = time.time()
@@ -63,6 +63,11 @@ class Simulation:
         self._odor_mem = 0.0
         self._odor_mem_t = 0
         self._odor_delta = 0.0
+        # stochastic internal steering state (OU process + bout bookkeeping —
+        # no scripted motion anywhere)
+        self._ou = 0.0
+        self._bout_t_left = 0.0
+        self._bout_steer = 0.0
 
     # ------------------------------------------------------------------
     def apply_sensory(self, tick: int) -> None:
@@ -169,24 +174,32 @@ class Simulation:
         turn_gate = float(np.clip(1.0 - 2.5 * rising, 0.15, 1.0))
         l_diff = levels.get("light_L", 0.0) - levels.get("light_R", 0.0)
         steer = self.MOTIV_TURN * ((oL - oR) * turn_gate + 0.5 * l_diff)
-        # plus a slow spontaneous-exploration wobble, suppressed on a strong
-        # gradient (Lévy-ish search when lost; tight tracking when on scent)
-        steer += self.MOTIV_WANDER * (1.0 - min(1.0, o_avg * 1.3)) * \
-            np.sin(self.t_ms / 2600.0 + 1.7 * np.sin(self.t_ms / 910.0))
+        # spontaneous steering is BRAIN-STATE noise, not a script: an
+        # Ornstein–Uhlenbeck process (slow, mean-reverting random walk —
+        # the standard model for internal states like arousal) biases the
+        # differential turn pools, so meander direction emerges instead of
+        # following any fixed pattern.  Suppressed while tracking odour.
+        g = 1.0 - min(1.0, o_avg * 1.3)
+        dt = self.net.DT_MS
+        self._ou += (-self._ou / 1200.0) * dt + self.net.rng.normal(0.0, 1.0) * (dt / 1200.0) ** 0.5
+        steer += self.MOTIV_WANDER * g * 2.2 * self._ou
+        # Poisson reorientation bouts: hazard ~1/7 s of sim time, random
+        # direction & duration 0.6-1.5 s (real flies reorient stochastically
+        # between straight runs — no timers anywhere)
+        if self._bout_t_left > 0:
+            self._bout_t_left -= dt
+            steer += self._bout_steer
+        elif dgr <= 0 and not touching and o_avg < 0.4 and levels.get("taste_sugar", 0) < 0.2:
+            if self.net.rng.random() < dt / 7000.0:
+                self._bout_t_left = float(self.net.rng.uniform(600, 1500))
+                self._bout_steer = float(self.net.rng.choice([-1.0, 1.0]) * self.net.rng.uniform(9, 15))
         # danger: strong alternating reorientation turns while backing away
         # (real flies: backward burst + body turn, then forward escape)
         if dgr > 0:
             steer += 18.0 * dgr * (1.0 if (self.t_ms // 700) % 2 == 0 else -1.0)
         # wall-contact: spin-scan while backing out of the corner
-        if touching:
+        elif touching:
             steer += 20.0 * (1.0 if (self.t_ms // 900) % 2 == 0 else -1.0)
-        # bold spontaneous reorientations: every ~9 s commit a ~1.2 s turn in
-        # alternating directions (real walking flies make sharp turn bouts;
-        # keeps the search from funnelling into one corner)
-        elif o_avg < 0.4 and levels.get("taste_sugar", 0) < 0.2:
-            cyc = self.t_ms // 9000
-            if self.t_ms % 9000 < 1300:
-                steer += 11.0 * (1.0 if cyc % 2 == 0 else -1.0)
         steer *= (1.0 - min(1.0, levels.get("taste_sugar", 0.0)))
         if abs(steer) > 0.01:
             pool = self.ch_idx["dn_turn"]
@@ -195,10 +208,10 @@ class Simulation:
                 tgt = pool[sideL] if steer > 0 else pool[~sideL]
                 if len(tgt):
                     self.net.inject(tgt, abs(steer))
-        # hunger rises over time, resets when eating
-        self.hunger = min(1.0, self.hunger + 0.00002)
+        # hunger rises over time, resets when eating (rates per 2 ms substep)
+        self.hunger = min(1.0, self.hunger + 0.00001)
         if self.last_levels.get("taste_sugar", 0) > 0.3:
-            self.hunger = max(0.0, self.hunger - 0.002)
+            self.hunger = max(0.0, self.hunger - 0.001)
         # user stimulation
         for idx, mv in self._stim_targets:
             self.net.stimulate_one(idx, mv)
@@ -206,10 +219,11 @@ class Simulation:
 
     # ------------------------------------------------------------------
     def step(self, n: int = 1) -> None:
-        for _ in range(n):
+        dt = self.net.DT_MS
+        for _ in range(max(1, int(n // dt))):
             self.apply_sensory(self.t_ms)
             self.net.step(self.net.DT_MS)
-            self.t_ms += 1
+            self.t_ms += int(dt)
             self.spikes_since_snapshot += int(self.net.spikes.sum())
         # motor decode at tick resolution (population rate)
         cmd = self.motor.decode(self.net.rate)
