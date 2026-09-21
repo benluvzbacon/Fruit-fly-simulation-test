@@ -125,7 +125,7 @@ class SimRunner(threading.Thread):
         elif a == "set_hunger":
             sim.hunger = float(np.clip(b.get("value", 0.5), 0.0, 1.0))
         elif a == "set_duty":
-            RUNNER.duty = float(np.clip(b.get("value", 0.55), 0.15, 0.95))
+            RUNNER.duty = float(np.clip(b.get("value", 0.55), 0.15, 1.0))
             sim.events.append(f"brain duty → {RUNNER.duty:.2f}")
         elif a == "teleport_fly":
             sim.body.pos = np.array([float(b["x"]), float(b["y"]), float(b.get("z", 0))], dtype=np.float32)
@@ -352,7 +352,7 @@ def main():
                     help="max CPU duty of the brain thread, 0.15-0.95 "
                          "(default 0.55 keeps the desktop smooth; raise on a fast machine)")
     args = ap.parse_args()
-    RUNNER.duty = float(np.clip(args.duty, 0.15, 0.95))
+    RUNNER.duty = float(np.clip(args.duty, 0.15, 1.0))
     # the banner prints unicode (→); keep it safe on a cp1252 Windows console
     for _s in (sys.stdout, sys.stderr):
         try:

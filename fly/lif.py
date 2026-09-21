@@ -23,6 +23,49 @@ import numpy as np
 
 from .connectome import Connectome
 
+# optional JIT acceleration — the same math is implemented in numpy below;
+# numba just fuses it into one compiled pass (no temporaries, one sweep).
+# Everything falls back cleanly when numba is unavailable (e.g. Python 3.14).
+try:
+    from numba import njit
+
+    @njit(cache=True, fastmath=True)
+    def _step_fused(v, spikes, rate, refr_counter, i_syn, in_norm, ext, bg,
+                    out_ptr, out_idx, eff,
+                    el, v_reset, v_thresh, tau_m, tau_syn, mv_per_unit, dt,
+                    refrac_steps, rate_a, rate_b):
+        n = v.shape[0]
+        # 1. event scatter: every edge whose presynaptic neuron fired
+        for j in range(n):
+            if spikes[j]:
+                s = out_ptr[j]
+                e = out_ptr[j + 1]
+                for k in range(s, e):
+                    i_syn[out_idx[k]] += eff[k]
+        decay = np.exp(-dt / tau_syn)
+        dtf = dt / tau_m
+        # 2-4. decay + integrate + spike/reset/refractory + rate in one sweep
+        for i in range(n):
+            i_syn[i] *= decay
+            refr = refr_counter[i] > 0
+            if not refr:
+                drive = (i_syn[i] * in_norm[i] + ext[i] + bg[i]) * mv_per_unit
+                v[i] += ((el - v[i]) + drive) * dtf
+            sp = False
+            if (not refr) and v[i] >= v_thresh:
+                sp = True
+            spikes[i] = sp
+            if sp:
+                v[i] = v_reset
+                refr_counter[i] = refrac_steps
+            elif refr:
+                refr_counter[i] -= 1
+            rate[i] = rate[i] * rate_a + (rate_b if sp else 0.0)
+
+    _FUSED = _step_fused
+except Exception:      # pragma: no cover — depends on local numba install
+    _FUSED = None
+
 
 class LIFNetwork:
     DT_MS = 2.0           # 2 ms substeps: halves compute per simulated second;
@@ -64,6 +107,14 @@ class LIFNetwork:
         # per-step channel buffer can be cheaply zeroed; rng over 139k is
         # ~2 ms, so it is only redrawn every few steps by the engine)
         self.bg_current = np.zeros(N, dtype=np.float32)
+        # preallocated step buffers — the hot loop allocates NOTHING per step
+        # (each 139k temporary used to cost ~0.1 ms in alloc + cache churn)
+        self._drive = np.empty(N, dtype=np.float32)
+        self._dv = np.empty(N, dtype=np.float32)
+        self._refr = np.empty(N, dtype=bool)
+        self._nrefr = np.empty(N, dtype=bool)
+        # None = not JIT-compiled yet / True = fused kernel / False = numpy path
+        self._fused_state = None
 
     # --------------------------------------------------------------
     def inject(self, idx: np.ndarray, current: float) -> None:
@@ -83,6 +134,30 @@ class LIFNetwork:
         dt = dt or self.DT_MS
         con = self.con
         ptr, idx = con.out_indptr, con.out_idx
+        # ---- accelerated path: compile once on the real arrays, remember
+        # whether it worked, then run the fused kernel every step
+        if self._fused_state is None:
+            if _FUSED is not None:
+                try:
+                    _FUSED(self.v, self.spikes, self.rate, self.refr_counter,
+                           self.i_syn, self.in_norm, self.ext_current,
+                           self.bg_current, ptr, idx, self.eff_out,
+                           self.el, self.v_reset, self.v_thresh, self.tau_m,
+                           self.tau_syn, self.MV_PER_UNIT, dt,
+                           self.refrac_steps, 0.88, 0.12)
+                    self._fused_state = True
+                except Exception:
+                    self._fused_state = False
+            else:
+                self._fused_state = False
+        if self._fused_state:
+            _FUSED(self.v, self.spikes, self.rate, self.refr_counter,
+                   self.i_syn, self.in_norm, self.ext_current,
+                   self.bg_current, ptr, idx, self.eff_out,
+                   self.el, self.v_reset, self.v_thresh, self.tau_m,
+                   self.tau_syn, self.MV_PER_UNIT, dt,
+                   self.refrac_steps, 0.88, 0.12)
+            return self.spikes
         # 1. event-driven scatter of presyn spikes onto the sparse graph.
         #    Benchmarked on the full 3.7 M-edge graph: per-spiking-neuron
         #    np.add.at wins by ~8× while spikes are sparse (<~3k/ms — the
@@ -101,22 +176,32 @@ class LIFNetwork:
                 contrib = np.bincount(idx[sel], weights=self.eff_out[sel],
                                       minlength=self.i_syn.size)
                 self.i_syn += contrib.astype(np.float32, copy=False)
-        # 2. synaptic dynamics (exponential decay)
+        # 2. synaptic dynamics (exponential decay, in place)
         self.i_syn *= float(np.exp(-dt / self.tau_syn))
-        # 3. membrane integration
-        refr = self.refr_counter > 0
-        drive = (self.i_syn * self.in_norm + self.ext_current
-                 + self.bg_current) * self.MV_PER_UNIT
-        dv = ((self.el - self.v) + drive) * (dt / self.tau_m)
-        self.v = np.where(refr, self.v, self.v + dv).astype(np.float32)
-        # 4. spike / reset / refractory
-        self.spikes = (~refr) & (self.v >= self.v_thresh)
+        # 3. membrane integration — fully in place, no temporaries
+        refr, nrefr = self._refr, self._nrefr
+        np.greater(self.refr_counter, 0, out=refr)
+        np.logical_not(refr, out=nrefr)
+        drive = self._drive
+        np.multiply(self.i_syn, self.in_norm, out=drive)
+        drive += self.ext_current
+        drive += self.bg_current
+        drive *= self.MV_PER_UNIT
+        dv = self._dv
+        np.subtract(self.el, self.v, out=dv)
+        dv += drive
+        dv *= (dt / self.tau_m)
+        dv[refr] = 0.0                      # hold while refractory
+        self.v += dv
+        # 4. spike / reset / refractory (in place)
+        np.greater_equal(self.v, self.v_thresh, out=self.spikes)
+        self.spikes &= nrefr
         self.v[self.spikes] = self.v_reset
         self.refr_counter[self.spikes] = self.refrac_steps
-        if refr.any():
-            self.refr_counter[refr] -= 1
-        self.rate = (self.rate * 0.88 + self.spikes.astype(np.float32) * 0.12
-                     ).astype(np.float32)
+        self.refr_counter[refr] -= 1
+        # rate low-pass (in place; same recurrence as before)
+        self.rate *= 0.88
+        self.rate[self.spikes] += 0.12
         return self.spikes
 
     def activity_for_view(self) -> np.ndarray:

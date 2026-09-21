@@ -236,6 +236,19 @@ class Simulation:
         if self.body.flying:
             cmd["fly"] = max(cmd["fly"],
                              0.5 + 0.25 * min(1.0, self.body.speed / 200.0))
+        # feeding arrest (SIMULATION APPROXIMATION of contact-evoked
+        # locomotor suppression — real flies STOP while ingesting): while
+        # sugar taste is active or a feeding bout is running, hold position.
+        # Loom/flash OVERRIDES arrest (predator beats dessert).  Without the
+        # arrest, residual network chatter pushed the fly off the food.
+        _flash_lvl = self.last_levels.get("light_flash", 0.0)
+        if (_flash_lvl <= 0.05 and self.groom_timer <= 0 and
+                (self.last_levels.get("taste_sugar", 0.0) > 0.2
+                 or self.body.feed_timer > 0.25)):
+            cmd["walk"] *= 0.05
+            cmd["backward"] = cmd.get("backward", 0.0) * 0.05
+            cmd["yaw"] *= 0.08
+            cmd["fly"] = min(cmd.get("fly", 0.0), 0.05)
         # post-ingestive grooming: when a feeding bout ends, flies run a
         # stereotyped foreleg/head-cleaning sequence (real fixed action
         # pattern — here it is a state-triggered reflex, not an animation

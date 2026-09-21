@@ -77,6 +77,12 @@ python server.py --port 8000 --duty 0.3   # cooler/quieter on a small laptop
 
 The header telemetry shows the resulting brain speed (fraction of realtime).
 
+**Optional accelerator:** `pip install numba` roughly triples brain speed on
+most machines (the LIF update is JIT-compiled; bit-identical results).  It is
+fully optional — without it the simulation runs on the built-in numpy path —
+and on Pythons numba does not support yet (e.g. very new releases) the
+fallback engages automatically and nothing breaks.
+
 If `data/flywire/processed/connectome_graph.npz` is missing, step 2 will be
 required once.  All heavy generating artifacts are git-ignored and regenerate
 deterministically from the committed raw files.
