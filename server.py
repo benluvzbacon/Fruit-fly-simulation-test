@@ -241,8 +241,10 @@ API = {
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *a):
-        pass
+    def log_message(self, fmt, *a):
+        # keep an access log: when a browser can't load assets, the 404s/errors
+        # show up here and explain themselves
+        sys.stderr.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), fmt % a))
 
     def _send(self, code, body=b"", ctype="text/plain", extra=None):
         if isinstance(body, str):

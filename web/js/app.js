@@ -12,9 +12,33 @@ const api = async (path, body) => {
 };
 
 const wrap = $("#canvas-wrap");
-const flyView = new FlyView(wrap);
-const neuralView = new NeuralView(wrap);
-neuralView.renderer.domElement.style.display = "none";
+
+// --- environment checks (fail loudly & visibly instead of a dead page) ----
+(function envCheck() {
+  const log = window.__errlog || console.error;
+  if (typeof HTMLScriptElement !== "undefined" && HTMLScriptElement.supports &&
+      !HTMLScriptElement.supports("importmap")) {
+    log("This browser has no import-map support (very old browser). " +
+        "Use a recent Chrome/Edge/Firefox — three.js can't load otherwise.");
+  }
+  try {
+    const c = document.createElement("canvas");
+    const gl = c.getContext("webgl2") || c.getContext("webgl");
+    if (!gl) throw new Error("null context");
+  } catch (e) {
+    log("WebGL unavailable: enable hardware acceleration in your browser settings; " +
+        "the 3D fly and brain views can't run without it. (" + (e.message || e) + ")");
+  }
+})();
+
+let flyView = null, neuralView = null;
+try {
+  flyView = new FlyView(wrap);
+  neuralView = new NeuralView(wrap);
+  neuralView.renderer.domElement.style.display = "none";
+} catch (e) {
+  (window.__errlog || console.error)("WebGL renderer failed to start: " + (e.stack || e));
+}
 let mode = "normal";
 let META = null;
 let worldBuilt = false;
@@ -22,6 +46,7 @@ let worldBuilt = false;
 // ------------------------------------------------------------ mode switch
 async function setMode(m) {
   mode = m;
+  if (!flyView || !neuralView) { window.__errlog?.("3D views unavailable — cannot switch mode"); return; }
   flyView.renderer.domElement.style.display = m === "normal" ? "" : "none";
   neuralView.renderer.domElement.style.display = m === "neural" ? "" : "none";
   $("#mode-normal").classList.toggle("active", m === "normal");
@@ -30,7 +55,8 @@ async function setMode(m) {
     ? "NORMAL VIEW — the fly in its world"
     : "NEURAL VIEW — the real FlyWire brain (139,255 neurons from v783)";
   if (m === "neural" && !neuralView.loaded) {
-    await neuralView.load();
+    try { await neuralView.load(); }
+    catch (e) { window.__errlog?.("brain layout failed to load: " + (e.message || e)); }
   }
   resize();
 }
@@ -85,10 +111,10 @@ function renderTelemetry(f) {
 
 // ------------------------------------------------------------ neuron info
 async function showNeuron(idx) {
-  if (idx < 0) { neuralView.selectNeuron(-1); $("#neuron-info").innerHTML = "<p class='dim'>no neuron under cursor</p>"; return; }
+  if (idx < 0) { neuralView?.selectNeuron(-1); $("#neuron-info").innerHTML = "<p class='dim'>no neuron under cursor</p>"; return; }
   const info = await api(`/api/neuron?idx=${idx}`);
   if (info.error) { $("#neuron-info").textContent = info.error; return; }
-  neuralView.selectNeuron(idx, info);
+  neuralView?.selectNeuron(idx, info);
   const kv = [
     ["root_id", info.root_id], ["cell_type", info.cell_type || "—"],
     ["supertype", info.supertype || "—"], ["super_class", info.super_class],
@@ -114,7 +140,7 @@ async function showNeuron(idx) {
 window.__stim = root => api("/api/command", { action: "stimulate", root_id: root, mv: 30 });
 window.__trace = root => { document.querySelector('[data-tab="trace"]').click(); $("#trace-seed").value = root; runTrace(root); };
 
-neuralView.onPick = idx => showNeuron(idx);
+if (neuralView) neuralView.onPick = idx => showNeuron(idx);
 
 $("#neuron-search-btn").onclick = findNeuron;
 $("#neuron-search").addEventListener("keydown", e => { if (e.key === "Enter") findNeuron(); });
@@ -177,13 +203,19 @@ let paused = false, lastBody = [300, 300, 0];
 async function poll() {
   try {
     const f = await api("/api/frame");
-    if (!worldBuilt && f.world) { flyView.buildWorld(f.world); worldBuilt = true; }
+    if (f.error) throw new Error(f.error);
+    if (flyView && !worldBuilt && f.world) { flyView.buildWorld(f.world); worldBuilt = true; }
     lastBody = f.body.pos;
-    flyView.update(f);
-    if (neuralView.loaded) neuralView.updateActivity(f.active_idx || [], f.active_val || []);
+    if (flyView) flyView.update(f);
+    if (neuralView && neuralView.loaded) neuralView.updateActivity(f.active_idx || [], f.active_val || []);
     renderTelemetry(f);
     if (f.paused !== paused) paused = f.paused;
+    $("#databadge").style.borderColor = "";
+    $("#databadge").style.color = "";
   } catch (e) {
+    const b = $("#databadge");
+    b.textContent = "⚠ cannot reach sim API (is python server.py running? port conflict?) — retrying…";
+    b.style.color = "#ff8d9e"; b.style.borderColor = "#7a2f3f";
     console.warn("poll", e);
   } finally {
     setTimeout(poll, 160);
@@ -192,22 +224,29 @@ async function poll() {
 
 function resize() {
   const w = wrap.clientWidth, h = wrap.clientHeight;
-  flyView.resize(w, h); neuralView.resize(w, h);
+  flyView && flyView.resize(w, h); neuralView && neuralView.resize(w, h);
 }
 addEventListener("resize", resize);
 
 (async function boot() {
-  META = await api("/api/meta");
+  try {
+    META = await api("/api/meta");
+  } catch (e) {
+    window.__errlog?.("API /api/meta failed: " + (e.message || e) +
+      " — the page must be loaded through `python server.py` (e.g. http://localhost:8000), not as a file.");
+    return;
+  }
   const c = META.counts;
   $("#databadge").textContent =
     `REAL FlyWire FAFB v783 · ${c.neurons.toLocaleString()} neurons · ` +
     `${c.edges_unique_pairs.toLocaleString()} connections · ${c.synapses.toLocaleString()} synapses`;
-  const legendEl = document.createElement("div");
   resize();
   poll();
   // render loop
   (function frame() {
-    if (mode === "normal") flyView.render(); else neuralView.render();
+    if (flyView && neuralView) {
+      if (mode === "normal") flyView.render(); else neuralView.render();
+    }
     requestAnimationFrame(frame);
   })();
 })();
