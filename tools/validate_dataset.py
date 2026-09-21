@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -20,6 +21,18 @@ ROOT = os.path.dirname(HERE)
 RAW = os.path.join(ROOT, "data", "flywire", "raw")
 PROC = os.path.join(ROOT, "data", "flywire", "processed")
 OUT = os.path.join(PROC, "validation_report.md")
+
+UTF8 = "utf-8"
+
+
+def _console_utf8() -> None:
+    """The report prints emoji/unicode; a cp1252 Windows console would crash,
+    so reconfigure stdout/stderr as UTF-8 with graceful replacement."""
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding=UTF8, errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def sha(path, chunk=1 << 22):
@@ -42,8 +55,10 @@ OFFICIAL = {  # official fafb.zip manifest (see data/flywire/raw/ORIGIN.md)
 
 
 def main():
+    _console_utf8()
     g = np.load(os.path.join(PROC, "connectome_graph.npz"))
-    meta = json.load(open(os.path.join(PROC, "meta.json")))
+    with open(os.path.join(PROC, "meta.json"), encoding=UTF8) as _mf:
+        meta = json.load(_mf)
     N = len(g["root_id"])
     E = len(g["out_idx"])
     books = meta["codebooks"]
@@ -122,7 +137,6 @@ def main():
     w(f"- largest out-degree: {int(deg_out.max()):,} · largest in-degree: {int(deg_in.max()):,}")
     w(f"- inhibitory edges (GABA/GLUT sources): {int((g['out_w'] < 0).sum()):,}")
     w(f"- excitatory edges: {int((g['out_w'] >= 0).sum()):,}")
-    selfloops = int((g["out_idx"][g["out_idx"] >= 0] == 0).sum() * 0)  # placeholder guard
     w(f"- weights are real synapse counts (range {float(np.abs(g['out_w']).min()):.0f}…"
       f"{float(np.abs(g['out_w']).max()):.0f})")
 
@@ -134,7 +148,7 @@ def main():
       "  skeleton meshes remain available from the official endpoint (GitHub cannot host them)\n")
 
     text = "\n".join(L)
-    with open(OUT, "w") as f:
+    with open(OUT, "w", encoding=UTF8, newline="\n") as f:
         f.write(text)
     print(text)
     print(f"\n→ {OUT}")

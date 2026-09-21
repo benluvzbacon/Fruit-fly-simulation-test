@@ -43,8 +43,8 @@ class Connectome:
         # flat edge maps for vectorised propagation (built from out-CSR)
         deg = self.out_deg.astype(np.int64)
         self.edge_src = np.repeat(np.arange(self.N, dtype=np.int32), deg)
-        # meta / codebooks
-        with open(os.path.join(proc_dir, "meta.json")) as f:
+        # meta / codebooks (read as UTF-8 on every platform, incl. Windows)
+        with open(os.path.join(proc_dir, "meta.json"), encoding="utf-8") as f:
             self.meta = json.load(f)
         self.books = self.meta["codebooks"]
         self.neuropils = self.meta["neuropils"]

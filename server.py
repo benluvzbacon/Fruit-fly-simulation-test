@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -148,7 +149,8 @@ class NeuronDB:
 
 RUNNER = SimRunner()
 DB = NeuronDB()
-META = json.load(open(os.path.join(PROC, "meta.json")))
+with open(os.path.join(PROC, "meta.json"), encoding="utf-8") as _mf:
+    META = json.load(_mf)
 
 
 # ---------------------------------------------------------------- API
@@ -312,6 +314,12 @@ def main():
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
     args = ap.parse_args()
+    # the banner prints unicode (→); keep it safe on a cp1252 Windows console
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     RUNNER.start()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"FlyWire fruit-fly simulation → http://{args.host}:{args.port}")

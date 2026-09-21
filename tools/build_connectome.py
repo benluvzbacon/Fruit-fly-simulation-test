@@ -54,7 +54,9 @@ NT_ALL = ["ACH", "GABA", "GLUT", "SER", "DA", "OCT"]
 
 # ---------------------------------------------------------------- helpers
 def _gz(path):
-    return gzip.open(path, "rt", newline="")
+    # explicit UTF-8 — the platform default codec (cp1252 on Windows) cannot
+    # decode the legal multibyte UTF-8 present in some FlyWire tables
+    return gzip.open(path, "rt", newline="", encoding="utf-8", errors="strict")
 
 
 def _sha(path, chunk=1 << 22):
@@ -473,7 +475,7 @@ def main() -> None:
         pos_bbox_um=dict(min=pos[has_pos == 1].min(0).tolist(), max=pos[has_pos == 1].max(0).tolist()),
         source_files=src_hashes,
     )
-    with open(os.path.join(PROC, "meta.json"), "w") as f:
+    with open(os.path.join(PROC, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=1)
     db.close()
 

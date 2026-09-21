@@ -70,6 +70,13 @@ If `data/flywire/processed/connectome_graph.npz` is missing, step 2 will be
 required once.  All heavy generating artifacts are git-ignored and regenerate
 deterministically from the committed raw files.
 
+**Windows note:** everything runs on a stock Windows 10/11 Python
+installation.  All FlyWire tables are read with explicit `encoding="utf-8"`
+(the label files contain legal multibyte characters such as `á`/`Δ`; relying
+on the Windows default codec — cp1252 — would crash), gzip archives are opened
+as gzip, ZIP archives are handled via `zipfile`, and binary payloads are
+never funneled through text readers.
+
 ---
 
 ## 3. What the simulation does

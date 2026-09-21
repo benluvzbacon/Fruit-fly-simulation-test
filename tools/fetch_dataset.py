@@ -102,7 +102,7 @@ def verify(raw_dir: str = RAW) -> bool:
         elif name == "processed_labels.csv.gz":
             # content is identical; the gzip container was re-deflated
             import gzip, io, csv
-            with gzip.open(p, "rt", newline="") as fh:
+            with gzip.open(p, "rt", newline="", encoding="utf-8", errors="strict") as fh:
                 rd = csv.reader(fh)
                 header = next(rd)
                 n = sum(1 for _ in rd)

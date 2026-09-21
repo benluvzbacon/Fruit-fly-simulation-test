@@ -1,12 +1,29 @@
 #!/usr/bin/env python3
 """Inspect the raw FlyWire FAFB files and report what is really in them.
 
-Reads every file under ``data/flywire/raw``, verifies gzip integrity, counts
-rows, enumerates value domains, cross-checks referential integrity between the
-tables, and writes ``data/flywire/raw/INSPECTION.md``.
+Reads every file under ``data/flywire/raw``, verifies gzip integrity by
+reading each archive to EOF, counts rows, enumerates value domains,
+cross-checks referential integrity between the tables, and writes
+``data/flywire/raw/INSPECTION.md``.
 
-Nothing is assumed ahead of time: the report below is generated from the files
-that are actually present.
+File handling rules (this is what this tool is careful about):
+
+* The FlyWire tables are **UTF-8 text**.  Some contain legal multibyte
+  characters (e.g. ``á``, ``Δ`` in label free-text within
+  ``processed_labels.csv.gz``).  They MUST be decoded as UTF-8.  Relying on
+  the platform default codec is a bug — on Windows that default is cp1252,
+  which cannot decode byte 0x9D (the final byte of several UTF-8 sequences)
+  and crashes with ``UnicodeDecodeError: 'charmap' codec can't decode byte``.
+* Compressed members (.gz) are detected via the gzip magic (1F 8B) and
+  streamed through ``gzip.open(..., encoding="utf-8")`` — never opened as
+  raw text.
+* ZIP containers are binary archives: they are inventoried through
+  :mod:`zipfile` and never opened with a text reader.
+* Unknown/binary payloads (NUL bytes in the first 8 KB) are fingerprinted
+  and skipped — their bytes are left untouched, never decoded, never written.
+
+Nothing is assumed ahead of time: the report below is generated from the
+files that are actually present.
 """
 from __future__ import annotations
 
@@ -15,6 +32,8 @@ import gzip
 import io
 import os
 import re
+import sys
+import zipfile
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -22,109 +41,179 @@ ROOT = os.path.dirname(HERE)
 RAW = os.path.join(ROOT, "data", "flywire", "raw")
 OUT = os.path.join(RAW, "INSPECTION.md")
 
-
-def open_maybe_gz(path):
-    if path.endswith(".gz"):
-        return gzip.open(path, "rt", newline="")
-    return open(path, "rt", newline="")
+UTF8 = "utf-8"
 
 
-def scan_csv(path, max_distinct=30):
-    """Return (header, n_rows, Counter-per-column for short columns)."""
-    with open_maybe_gz(path) as f:
-        rd = csv.reader(f)
-        header = next(rd)
-        n = 0
-        counters = [Counter() for _ in header]
-        numeric_stats = [None] * len(header)
-        for row in rd:
-            n += 1
-            if n <= 200000:  # distinct-domain sampling cap
-                for i, v in enumerate(row):
-                    if len(counters[i]) < max_distinct or v in counters[i]:
-                        counters[i][v] += 1
-            for i, v in enumerate(row):
-                try:
-                    x = float(v.strip("[]").split()[0])
-                except (ValueError, IndexError):
-                    continue
-                st = numeric_stats[i]
-                numeric_stats[i] = (x, x) if st is None else (min(st[0], x), max(st[1], x))
-    return header, n, counters, numeric_stats
+# ------------------------------------------------------------------
+# Format-aware opening helpers (Windows-safe: never use the locale codec)
+# ------------------------------------------------------------------
+class NotTextFile(ValueError):
+    """Raised when a text reader is (incorrectly) used on a binary file."""
+
+
+def sniff_format(path: str) -> str:
+    """Classify a file by magic bytes, not by extension:
+    'gzip' (1F8B), 'zip' (PK\\x03\\x04), 'binary' (NUL present),
+    'text' (decodable as UTF-8 in the first 8 KB), 'empty'."""
+    with open(path, "rb") as f:
+        head = f.read(8192)
+    if not head:
+        return "empty"
+    if head[:2] == b"\x1f\x8b":
+        return "gzip"
+    if head[:4] == b"PK\x03\x04":
+        return "zip"
+    if b"\x00" in head:
+        return "binary"
+    try:
+        head.decode(UTF8)
+        return "text"
+    except UnicodeDecodeError as e:
+        raise NotTextFile(
+            f"{path!r}: not UTF-8 text in first 8 KB "
+            f"({e}); will not guess an encoding") from e
+
+
+def open_tabular_text(path: str):
+    """Open a (possibly gzip-compressed) *text* table strictly as UTF-8.
+
+    ``encoding="utf-8"`` is explicit so behaviour is identical on Linux,
+    macOS and Windows regardless of the system code page.  ``errors="strict"``
+    (the default) is intentional: invalid bytes surface as an error naming
+    the file instead of silently corrupting data."""
+    kind = sniff_format(path)
+    if kind == "gzip":
+        return gzip.open(path, "rt", encoding=UTF8, errors="strict", newline="")
+    if kind == "text":
+        return open(path, "rt", encoding=UTF8, errors="strict", newline="")
+    raise NotTextFile(f"{path!r} is {kind}, not a text table")
+
+
+def zip_inventory(path: str) -> list[tuple[str, int, int]]:
+    """(name, compressed_size, uncompressed_size) per member of a ZIP."""
+    with zipfile.ZipFile(path) as zf:
+        bad = zf.testzip()
+        if bad is not None:
+            raise IOError(f"{path!r}: member {bad!r} failed the CRC check")
+        return [(i.filename, i.compress_size, i.file_size) for i in zf.infolist()]
+
+
+def enable_console_utf8() -> None:
+    """Let the report also *print* on a cp1252 Windows console without
+    crashing (replaces un-printable glyphs rather than dying)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding=UTF8, errors="replace")
+        except (AttributeError, ValueError):
+            pass
 
 
 def fmt_counter(c: Counter, k=18) -> str:
     return ", ".join(f"``{v or '∅'}`` ({n:,})" for v, n in c.most_common(k))
 
 
+def write_report(lines: list[str]) -> None:
+    # explicit UTF-8: the report itself contains non-ASCII glyphs
+    with open(OUT, "w", encoding=UTF8, newline="\n") as f:
+        f.write("\n".join(lines))
+
+
+# ------------------------------------------------------------------
 def main() -> None:
-    files = sorted(
-        f for f in os.listdir(RAW)
-        if f.endswith((".csv", ".csv.gz", ".tsv", ".tsv.gz", ".zip"))
-    )
-    if not files:
+    enable_console_utf8()
+    names = sorted(os.listdir(RAW))
+    if not names:
         raise SystemExit("no raw files — run tools/fetch_dataset.py first")
 
     L: list[str] = []
     w = L.append
     w("# FAFB v783 raw-file inspection\n")
-    w("Generated by `tools/inspect_dataset.py` from the files on disk. ")
-    w("Every number below was counted, not assumed.\n")
+    w("Generated by `tools/inspect_dataset.py` from the files on disk.  "
+      "Every number below was counted, not assumed.  All text decoding uses "
+      "explicit UTF-8 (the FlyWire tables contain legal multibyte UTF-8, "
+      "e.g. `á`, `Δ`; the platform default codec — cp1252 on Windows — is "
+      "never used).\n")
 
     roots: set[str] = set()
-    coord_rows = 0
-    coord_span = None
 
-    for fn in files:
+    for fn in names:
         path = os.path.join(RAW, fn)
-        w(f"\n## `{fn}` ({os.path.getsize(path):,} bytes)\n")
-        delim = "\t" if fn.endswith((".tsv", ".tsv.gz")) else ","
-        with open_maybe_gz(path) as f:
+        size = os.path.getsize(path)
+        kind = sniff_format(path)
+        base = fn[:-3] if fn.endswith(".gz") else fn
+        stem, dot, ext = base.rpartition(".")
+        tabular = ext in ("csv", "tsv")
+
+        w(f"\n## `{fn}` ({size:,} bytes)\n")
+        w(f"- container: **{kind}**"
+          + (" · text payload: UTF-8" if kind in ("gzip", "text") else "") + "\n")
+
+        # ---- ZIP archives: inventory only, never text-read ------------------
+        if kind == "zip":
+            inv = zip_inventory(path)
+            w(f"- ZIP archive, {len(inv)} member(s), CRC verified by reading all:\n")
+            for name, cs, us in inv:
+                w(f"  - `{name}` — {us:,} bytes (stored {cs:,})\n")
+            w("- note: archive kept intact; members are inspected by simply "
+              "extracting first and re-running this tool\n")
+            continue
+
+        # ---- plain/binary non-tabular files: fingerprint, leave untouched ---
+        if not tabular:
+            w(f"- not a tabular dataset file ({'binary/unknown payload' if kind == 'binary' else 'documentation/notes'}); "
+              f"bytes left untouched\n")
+            continue
+
+        # ---- tabular text ---------------------------------------------------
+        delim = "\t" if ext == "tsv" else ","
+        with open_tabular_text(path) as f:  # EOF reached => gzip CRC verified
             rd = csv.reader(f, delimiter=delim)
-            try:
-                header = next(rd)
-            except StopIteration:
-                w("- EMPTY FILE\n")
-                continue
+            header = next(rd)
             n = 0
             counters = [Counter() for _ in header]
             for row in rd:
                 n += 1
-                if row:
-                    if fn.startswith("classification") and len(row) >= 8:
-                        for idx in (1, 2, 3, 6, 7):
-                            if len(counters[idx]) < 40:
-                                counters[idx][row[idx]] += 1
-                    elif fn.startswith("neurons") and len(row) >= 4:
-                        for idx in (1, 2):
-                            if len(counters[idx]) < 60:
-                                counters[idx][row[idx]] += 1
-                    elif fn.startswith("annotations") and len(row) >= 12:
-                        for idx in (9, 10):
-                            if len(counters[idx]) < 20:
-                                counters[idx][row[idx]] += 1
-                    elif fn.startswith("processed_labels"):
-                        pass
-                if fn.startswith("classification") and row and fn != "":
-                    if len(row) > 0:
-                        roots.add(row[0])
-            w(f"- schema ({len(header)} columns): `{', '.join(header)}`\n")
-            w(f"- data rows: **{n:,}**\n")
-            if fn.startswith("classification"):
-                w(f"- distinct root IDs: {len(roots):,}\n")
-                w(f"- `flow`: {fmt_counter(counters[1])}\n")
-                w(f"- `super_class`: {fmt_counter(counters[2])}\n")
-                w(f"- `class`: {fmt_counter(counters[3])}\n")
-                w(f"- `side`: {fmt_counter(counters[6])}\n")
-                w(f"- `nerve`: {fmt_counter(counters[7])}\n")
-            elif fn.startswith("neurons"):
-                w(f"- `group` (top): {fmt_counter(counters[1], 14)}…\n")
-                w(f"- `nt_type`: {fmt_counter(counters[2])}\n")
-            elif fn.startswith("annotations"):
-                w(f"- `flow`: {fmt_counter(counters[9])}\n")
-                w(f"- `super_class`: {fmt_counter(counters[10])}\n")
+                if fn.startswith("classification") and len(row) >= 8:
+                    for idx in (1, 2, 3, 6, 7):
+                        counters[idx][row[idx]] += 1
+                    roots.add(row[0])
+                elif fn.startswith("neurons") and len(row) >= 4:
+                    for idx in (1, 2):
+                        counters[idx][row[idx]] += 1
+                elif fn.startswith("annotations") and len(row) >= 12:
+                    for idx in (9, 10):
+                        counters[idx][row[idx]] += 1
+        w(f"- schema ({len(header)} columns): `{', '.join(header)}`\n")
+        w(f"- data rows: **{n:,}** (streamed to EOF ⇒ gzip container integrity verified)\n")
 
-    # --- connections aggregation + referential integrity -------------------
+        # count multibyte characters actually present
+        if fn.endswith(".gz"):
+            pass  # (already streamed; gzip CRC covers integrity)
+
+        if fn.startswith("classification"):
+            w(f"- distinct root IDs: {len(roots):,}\n")
+            w(f"- `flow`: {fmt_counter(counters[1])}\n")
+            w(f"- `super_class`: {fmt_counter(counters[2])}\n")
+            w(f"- `class`: {fmt_counter(counters[3])}\n")
+            w(f"- `side`: {fmt_counter(counters[6])}\n")
+            w(f"- `nerve`: {fmt_counter(counters[7])}\n")
+        elif fn.startswith("neurons"):
+            w(f"- `group` (top): {fmt_counter(counters[1], 14)}…\n")
+            w(f"- `nt_type`: {fmt_counter(counters[2])}\n")
+        elif fn.startswith("annotations"):
+            w(f"- `flow`: {fmt_counter(counters[9])}\n")
+            w(f"- `super_class`: {fmt_counter(counters[10])}\n")
+        elif fn.startswith("processed_labels"):
+            # surface the multibyte content that exists in this file
+            with open_tabular_text(path) as f2:
+                txt = f2.read()
+            specials = sorted({ch for ch in txt if ord(ch) > 127})
+            if specials:
+                shown = "".join(specials[:12])
+                w(f"- contains {len(specials)} distinct non-ASCII characters "
+                  f"(valid UTF-8, e.g. `{shown}`) — requires UTF-8 decoding\n")
+
+    # ---------------- connectivity + referential integrity -----------------
     conn = os.path.join(RAW, "connections_princeton.csv.gz")
     if os.path.exists(conn):
         w("\n## `connections_princeton.csv.gz` — connectivity quality\n")
@@ -134,10 +223,10 @@ def main() -> None:
         neuropils: Counter = Counter()
         nts: Counter = Counter()
         pre_set, post_set = set(), set()
-        with gzip.open(conn, "rt", newline="") as f:
+        seen = set()
+        with open_tabular_text(conn) as f:   # explicit UTF-8, EOF-verified
             rd = csv.reader(f)
-            header = next(rd)
-            seen = set()
+            next(rd)
             for row in rd:
                 key = (row[0], row[1])
                 if key not in seen:
@@ -152,22 +241,22 @@ def main() -> None:
                 syn_hist["50+"] += sc >= 50
                 pre_set.add(row[0])
                 post_set.add(row[1])
-            pairs = len(seen)
+        pairs = len(seen)
         w(f"- rows (pre, post, neuropil): **{neuropils.total():,}**\n")
         w(f"- unique neuron pairs: **{pairs:,}**\n")
         w(f"- total synapses: **{syns:,}**\n")
         w(f"- synapses per row: " + " · ".join(f"{k}: {v:,}" for k, v in syn_hist.items()) + "\n")
         w(f"- distinct sources: {len(pre_set):,} · distinct targets: {len(post_set):,}\n")
         w(f"- neurotransmitter column: {fmt_counter(nts)}\n")
-        w(f"- neuropils ({len(neuropils)}): `{', '.join(sorted(neuropils)[:60])}{'…' if len(neuropils)>60 else ''}`\n")
+        w(f"- neuropils ({len(neuropils)}): `{', '.join(sorted(neuropils)[:60])}"
+          f"{'…' if len(neuropils) > 60 else ''}`\n")
         if roots:
             missing = sum(1 for s in pre_set | post_set if s not in roots)
             w(f"- endpoints not present in the neuron table: {missing:,} "
-              f"(these are tiny un-proofread fragments; the importer keeps only verified neurons)\n")
+              f"(tiny un-proofread fragments; the importer keeps only verified neurons)\n")
 
-    with open(OUT, "w") as f:
-        f.write("\n".join(L))
-    print("wrote", OUT)
+    write_report(L)
+    print(f"inspection complete → {OUT}  ({len(names)} files)")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
  "dataset": "FlyWire FAFB v783",
  "official_source": "https://codex.flywire.ai/api/download?dataset=fafb",
- "built": "2026-09-20T23:35:34Z",
+ "built": "2026-09-21T01:22:19Z",
  "counts": {
   "neurons": 139255,
   "edges_unique_pairs": 3732460,
