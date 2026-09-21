@@ -218,7 +218,7 @@ async function poll() {
     b.style.color = "#ff8d9e"; b.style.borderColor = "#7a2f3f";
     console.warn("poll", e);
   } finally {
-    setTimeout(poll, 160);
+    setTimeout(poll, 200);   // 5 polls/s; fly motion is interpolated between them
   }
 }
 

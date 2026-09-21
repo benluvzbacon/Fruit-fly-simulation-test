@@ -33,14 +33,22 @@ from fly.engine import Simulation  # noqa: E402
 
 # ---------------------------------------------------------------- state
 class SimRunner(threading.Thread):
-    """Background loop stepping the brain as fast as the machine allows."""
+    """Background loop stepping the brain as fast as the duty cycle allows.
 
-    def __init__(self):
+    The old loop aimed each compute slice at ~95 ms per 100 ms wall — i.e. it
+    pinned a full CPU core at ~100 % and starved the browser on the same
+    machine (page felt "laggy").  `duty` caps the compute fraction: with the
+    default 0.55 the engine uses at most ~55 % of one core and sleeps out the
+    rest, keeping the whole desktop responsive.
+    """
+
+    def __init__(self, duty: float = 0.55):
         super().__init__(daemon=True)
         self.sim = Simulation()
         self.lock = threading.RLock()
         self.running = True
         self.paused = False
+        self.duty = float(np.clip(duty, 0.15, 0.95))
         self.steps_this_slice = 0
         self.slice_cost_ms = 5.0
         self.target_steps = 30
@@ -60,16 +68,18 @@ class SimRunner(threading.Thread):
                     print("engine error:", repr(e), flush=True)
                     time.sleep(0.2)
             cost = max(1.0, (time.time() - t0) * 1000.0)
-            # adapt: aim for ≤ ~90 ms compute per ~100 ms slice
+            # aim each compute slice at ~55 ms of simulation...
             self.target_steps = int(np.clip(
-                self.target_steps * 95.0 / cost, 8, 120))
-            time.sleep(0.005)
+                self.target_steps * 55.0 / cost, 6, 120))
+            # ...then sleep out the remainder of the duty window
+            idle_ms = cost * (1.0 - self.duty) / self.duty
+            time.sleep(min(0.25, max(0.004, idle_ms / 1000.0)))
 
-    def snapshot(self, topk: int = 14000) -> dict:
+    def snapshot(self, topk: int = 4000) -> dict:
         with self.lock:
             s = self.sim.snapshot(topk)
             s["target_steps"] = self.target_steps
-            s["sim_speed_x"] = round(self.target_steps / 100.0, 2)
+            s["sim_speed_x"] = round(self.target_steps / 100.0 * self.duty / 0.55, 2)
             s["wall_time_s"] = round(time.time() - self.start_wall, 1)
         return s
 
@@ -147,7 +157,7 @@ class NeuronDB:
         return [dict(r) for r in rows]
 
 
-RUNNER = SimRunner()
+RUNNER = SimRunner(duty=float(os.environ.get("SIM_DUTY", "0.55")))
 DB = NeuronDB()
 with open(os.path.join(PROC, "meta.json"), encoding="utf-8") as _mf:
     META = json.load(_mf)
@@ -155,7 +165,7 @@ with open(os.path.join(PROC, "meta.json"), encoding="utf-8") as _mf:
 
 # ---------------------------------------------------------------- API
 def api_frame(args: dict) -> dict | bytes:
-    topk = int(args.get("topk", ["14000"])[0])
+    topk = min(20000, max(200, int(args.get("topk", ["4000"])[0])))
     return RUNNER.snapshot(topk)
 
 
@@ -165,20 +175,32 @@ def api_meta(_args) -> dict:
     return m
 
 
-def api_layout(_args) -> bytes:
-    """Binary layout: JSON header line, then raw arrays.
+_LAYOUT_CACHE: bytes | None = None
 
-    Header: {"n": N, "fields": [...]}
-    Body: pos float32[N,3], super_class uint8[N], side uint8[N], nt uint8[N]
+
+def api_layout(_args) -> bytes:
+    """Binary layout: JSON header line, then raw arrays — BUILT ONCE, then cached.
+
+    Header: {"n": N, "super_class": [...], "side": [...], "nt": [...]}
+    Body: pos float32[N,3], super_class int16[N], side int16[N], nt int16[N]
+
+    The header line is padded so every typed array starts 8-byte aligned —
+    `new Float32Array(buf, offset, …)` throws RangeError on an unaligned
+    offset, which is exactly what a 275-byte header produced.
     """
+    global _LAYOUT_CACHE
+    if _LAYOUT_CACHE is not None:
+        return _LAYOUT_CACHE
     con = RUNNER.sim.con
-    pos = con.pos.astype(np.float32)
+    pos = np.ascontiguousarray(con.pos, dtype=np.float32)
     sup = con.super_class.astype(np.int16)
     side = con.side.astype(np.int16)
     nt = con.nt.astype(np.int16)
     header = json.dumps({"n": con.N, "super_class": META["codebooks"]["super_class"],
-                         "side": META["codebooks"]["side"], "nt": META["codebooks"]["nt"]}) + "\n"
-    body = header.encode() + pos.tobytes() + sup.tobytes() + side.tobytes() + nt.tobytes()
+                         "side": META["codebooks"]["side"], "nt": META["codebooks"]["nt"]})
+    pad = (-(len(header) + 1)) % 8          # header + "\n" lands on an 8-byte boundary
+    body = (header + " " * pad + "\n").encode() + pos.tobytes() + sup.tobytes() + side.tobytes() + nt.tobytes()
+    _LAYOUT_CACHE = body
     return body
 
 
@@ -323,7 +345,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8000)
+    ap.add_argument("--duty", type=float, default=0.55,
+                    help="max CPU duty of the brain thread, 0.15-0.95 "
+                         "(default 0.55 keeps the desktop smooth; raise on a fast machine)")
     args = ap.parse_args()
+    RUNNER.duty = float(np.clip(args.duty, 0.15, 0.95))
     # the banner prints unicode (→); keep it safe on a cp1252 Windows console
     for _s in (sys.stdout, sys.stderr):
         try:

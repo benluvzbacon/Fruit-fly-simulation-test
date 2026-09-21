@@ -66,6 +66,17 @@ python server.py --port 8000
 # open http://localhost:8000/
 ```
 
+If the page feels heavy, the brain thread is capped at ~55 % of one CPU core
+by default; the 3D scene animates smoothly regardless (the browser
+interpolates between physics updates).  Tuning:
+
+```bash
+python server.py --port 8000 --duty 0.8   # let the brain use up to 80 % of a core (faster sim)
+python server.py --port 8000 --duty 0.3   # cooler/quieter on a small laptop
+```
+
+The header telemetry shows the resulting brain speed (fraction of realtime).
+
 If `data/flywire/processed/connectome_graph.npz` is missing, step 2 will be
 required once.  All heavy generating artifacts are git-ignored and regenerate
 deterministically from the committed raw files.

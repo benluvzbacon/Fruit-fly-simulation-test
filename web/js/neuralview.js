@@ -54,7 +54,10 @@ export class NeuralView {
     this.ntNames = header.nt;
     this.n = n;
 
-    // positions Float32 [x,y,z] in µm → centre & scale
+    // positions Float32 [x,y,z] in µm → centre & scale.
+    // ~9% of neurons have NO coordinates in v783 (NaN) — park them at the
+    // centre, otherwise NaNs poison the bounding sphere and three.js culls
+    // the entire cloud (blank neural view).
     const P = new Float32Array(n * 3);
     let cx = 0, cy = 0, cz = 0, cnt = 0;
     for (let i = 0; i < n; i++) {
@@ -65,8 +68,11 @@ export class NeuralView {
     this.center = [cx, cy, cz];
     let maxr = 0;
     for (let i = 0; i < n; i++) {
-      const x = (this.pos[i * 3] - cx) * UM2U, y = (this.pos[i * 3 + 1] - cy) * UM2U,
-            z = (this.pos[i * 3 + 2] - cz) * UM2U;
+      const finite = Number.isFinite(this.pos[i * 3]) &&
+                     Number.isFinite(this.pos[i * 3 + 1]) && Number.isFinite(this.pos[i * 3 + 2]);
+      const x = ((finite ? this.pos[i * 3] : cx) - cx) * UM2U,
+            y = ((finite ? this.pos[i * 3 + 1] : cy) - cy) * UM2U,
+            z = ((finite ? this.pos[i * 3 + 2] : cz) - cz) * UM2U;
       P[i * 3] = x; P[i * 3 + 1] = y; P[i * 3 + 2] = z;
       maxr = Math.max(maxr, Math.hypot(x, y, z));
     }
@@ -85,12 +91,19 @@ export class NeuralView {
       blending: THREE.AdditiveBlending,
     });
     this.cloud = new THREE.Points(geo, mat);
+    this.cloud.frustumCulled = false;
     this.scene.add(this.cloud);
 
-    // activity overlay (points rebuilt per frame)
+    // preallocated activity overlay buffers (rebuilt per poll, zero GC churn)
+    this.actCap = 16000;
+    this.actPos = new Float32Array(this.actCap * 3);
+    this.actCol = new Float32Array(this.actCap * 3);
+
+    // activity overlay (attributes REFERENCE the preallocated buffers)
     this.actGeo = new THREE.BufferGeometry();
-    this.actGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(3), 3));
-    this.actGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(3), 3));
+    this.actGeo.setAttribute("position", new THREE.BufferAttribute(this.actPos, 3));
+    this.actGeo.setAttribute("color", new THREE.BufferAttribute(this.actCol, 3));
+    this.actGeo.setDrawRange(0, 0);
     this.activePts = new THREE.Points(this.actGeo, new THREE.PointsMaterial({
       size: 3.2, vertexColors: true, transparent: true, opacity: 0.95,
       sizeAttenuation: true, depthWrite: false, blending: THREE.AdditiveBlending }));
@@ -133,16 +146,17 @@ export class NeuralView {
   }
 
   updateActivity(indices, values) {
-    const k = Math.min(indices.length, 16000);
-    const P = new Float32Array(k * 3), C = new Float32Array(k * 3);
+    const k = Math.min(indices.length, this.actCap);
+    const P = this.actPos, C = this.actCol;
     for (let j = 0; j < k; j++) {
       const i = indices[j];
       P[j * 3] = this.posW[i * 3]; P[j * 3 + 1] = this.posW[i * 3 + 1]; P[j * 3 + 2] = this.posW[i * 3 + 2];
       const v = Math.max(0, Math.min(1, values[j] ?? 0));
       C[j * 3] = 0.35 + v * 0.65; C[j * 3 + 1] = v * 0.25 + 0.9 * v * v; C[j * 3 + 2] = 0.08;
     }
-    this.actGeo.setAttribute("position", new THREE.BufferAttribute(P, 3));
-    this.actGeo.setAttribute("color", new THREE.BufferAttribute(C, 3));
+    this.actGeo.setDrawRange(0, k);
+    this.actGeo.attributes.position.needsUpdate = true;
+    this.actGeo.attributes.color.needsUpdate = true;
   }
 
   selectNeuron(idx, info) {

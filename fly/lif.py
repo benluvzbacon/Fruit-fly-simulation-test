@@ -59,6 +59,10 @@ class LIFNetwork:
         self.spikes = np.zeros(N, dtype=bool)
         self.rate = np.zeros(N, dtype=np.float32)
         self.ext_current = np.zeros(N, dtype=np.float32)
+        # slowly-refreshed background "noise" drive (kept separate so the
+        # per-step channel buffer can be cheaply zeroed; rng over 139k is
+        # ~2 ms, so it is only redrawn every few steps by the engine)
+        self.bg_current = np.zeros(N, dtype=np.float32)
 
     # --------------------------------------------------------------
     def inject(self, idx: np.ndarray, current: float) -> None:
@@ -78,7 +82,12 @@ class LIFNetwork:
         dt = dt or self.DT_MS
         con = self.con
         ptr, idx = con.out_indptr, con.out_idx
-        # 1. event-driven scatter of presyn spikes onto the sparse graph
+        # 1. event-driven scatter of presyn spikes onto the sparse graph.
+        #    Benchmarked on the full 3.7 M-edge graph: per-spiking-neuron
+        #    np.add.at wins by ~8× while spikes are sparse (<~3k/ms — the
+        #    normal regime); the batch mask+bincount path only makes sense
+        #    for seizure-sized bursts.  Benchmarks live in this comment
+        #    because a "more vectorised" version was tried and was 8× slower.
         if self.spikes.any():
             act = np.nonzero(self.spikes)[0]
             if len(act) <= 3000:
@@ -88,12 +97,15 @@ class LIFNetwork:
                         np.add.at(self.i_syn, idx[s:e], self.eff_out[s:e])
             else:
                 sel = self.spikes[con.edge_src]
-                np.add.at(self.i_syn, idx[sel], self.eff_out[sel])
+                contrib = np.bincount(idx[sel], weights=self.eff_out[sel],
+                                      minlength=self.i_syn.size)
+                self.i_syn += contrib.astype(np.float32, copy=False)
         # 2. synaptic dynamics (exponential decay)
         self.i_syn *= float(np.exp(-dt / self.tau_syn))
         # 3. membrane integration
         refr = self.refr_counter > 0
-        drive = (self.i_syn * self.in_norm + self.ext_current) * self.MV_PER_UNIT
+        drive = (self.i_syn * self.in_norm + self.ext_current
+                 + self.bg_current) * self.MV_PER_UNIT
         dv = ((self.el - self.v) + drive) * (dt / self.tau_m)
         self.v = np.where(refr, self.v, self.v + dv).astype(np.float32)
         # 4. spike / reset / refractory

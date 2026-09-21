@@ -21,6 +21,17 @@ from .body import FlyBody
 
 
 class Simulation:
+    # --- tunable SIMULATION APPROXIMATION constants (all connectivity is REAL)
+    BG_MEAN = 2.8          # background drive mean (tuned: sparse-but-alive,
+                           # ~600k spikes/s network-wide, no seizure)
+    BG_STD = 1.0           # background drive spread
+    MOTIV_FORWARD = 3.2    # hunger-gated foraging drive onto DNa forward pool
+    MOTIV_ODOR_FORWARD = 4.5   # extra forward drive proportional to food odor
+    MOTIV_LIGHT_FORWARD = 1.6  # mild phototaxis onto forward pool
+    MOTIV_TURN = 26.0      # bilateral imbalance → turn-pool steering
+                       # (calibrated vs decoder: 8+ units for a real turn)
+    MOTIV_WANDER = 6.0     # spontaneous search-pattern wobble
+
     def __init__(self, seed: int = 7):
         t0 = time.time()
         self.con = get_connectome()
@@ -48,22 +59,39 @@ class Simulation:
         self.last_cmd: dict = {}
         # stimulation requests (user-triggered)
         self._stim_targets: list[tuple[int, float]] = []
+        # klinotaxis odour memory (motivational APPROXIMATION state)
+        self._odor_mem = 0.0
+        self._odor_mem_t = 0
+        self._odor_delta = 0.0
 
     # ------------------------------------------------------------------
-    def apply_sensory(self) -> None:
-        self.sensory.hunger = self.hunger
-        levels = self.sensory.compute()
-        self.last_levels = levels
-        # fresh drive each micro-step; spontaneous sensory firing
-        # (APPROXIMATION — real receptors fire spontaneously at a few Hz,
-        # keeping downstream circuits warm; keeps the network alive at rest)
-        self.net.ext_current = (
-            self.net.rng.normal(0.4, 0.3, self.net.v.shape[0])
-        ).clip(0.0, None).astype(np.float32)
-        # spontaneous receptor events: ~8 ms depolarising pulses (mean rate
-        # equivalent to a few Hz — receptors really do fire in the dark)
-        new_ev = self.net.rng.random(len(self.sens_idx)) < 0.001
-        self.spont_buf[new_ev] = 8.0
+    def apply_sensory(self, tick: int) -> None:
+        # --- periodic (cheap-amortised) work --------------------------------
+        # Recomputing world levels, drawing 139k gaussians and 15k uniform
+        # randoms EVERY 1 ms step cost ~3 ms per simulated millisecond —
+        # more than the network update itself.  These signals change on a
+        # ~10 ms timescale, so they are refreshed periodically instead:
+        #   background noise : every 8 steps
+        #   world levels + spontaneous events : every 4 steps
+        if tick % 4 == 0:
+            self.sensory.hunger = self.hunger
+            self.last_levels = self.sensory.compute()
+            # spontaneous receptor events: ~8 ms depolarising pulses (mean
+            # rate equivalent to a few Hz — receptors really do fire in the
+            # dark).  Refreshed every 4 steps at 4× probability.
+            self.spont_buf[self.net.rng.random(len(self.sens_idx)) < 0.004] = 8.0
+        levels = self.last_levels
+        if tick % 8 == 0:
+            # fresh drive background noise (APPROXIMATION — keeps the network
+            # warm; see module docs).  Mean bias ~4.4 units ≈ el + 15 mV:
+            # just below threshold, so real sensory channels (≈5+ units)
+            # push neurons over it instead of the brain sitting comatose.
+            bg = self.net.rng.normal(self.BG_MEAN, self.BG_STD, self.net.v.shape[0])
+            np.clip(bg, 0.0, None, out=bg)
+            self.net.bg_current = bg.astype(np.float32)
+        # --- per-step cheap work --------------------------------------------
+        # channel injection buffer starts clean each step
+        self.net.ext_current[:] = 0.0
         active_sp = self.spont_buf > 0
         if active_sp.any():
             self.net.inject(self.sens_idx[active_sp], 13.0)
@@ -91,9 +119,62 @@ class Simulation:
             # aversive odour: bitter afferents carry avoid signal
             # (approximation: aversive olfaction shares gustatory-avoid path)
             self.net.inject(self.ch_idx["taste_bitter"], 6.0 * dgr)
-            # noxious drive onto backward-walking MDNs (escape reflex)
+            # noxious drive onto backward-walking MDNs (escape reflex) —
+            # strong, like the loom→giant-fiber path: MDNs are heavily
+            # inhibited by network feedback, weak drives never reach stride
             if len(self.ch_idx["dn_walk_backward"]):
-                self.net.inject(self.ch_idx["dn_walk_backward"], 8.0 * dgr)
+                self.net.inject(self.ch_idx["dn_walk_backward"], 22.0 * dgr)
+
+        # ---- motivational / state drive (SIMULATION APPROXIMATION) ---------
+        # Real flies initiate locomotion from internal state (hunger, arousal)
+        # and orient along sensory gradients; the descending neurons that
+        # express this (DNa02 forward, DNb01/DNp15 turning) are REAL, but the
+        # upstream motivational computation (dopaminergic gating etc.) is too
+        # state-dependent for generic LIF weights to express on its own.
+        # These small state-dependent currents onto the REAL DN pools close
+        # the internal-state → action loop; sensory routing still flows through
+        # the REAL graph (injected afferents above).
+        m_fwd = self.MOTIV_FORWARD * (0.30 + 0.70 * self.hunger)
+        m_fwd += self.MOTIV_ODOR_FORWARD * (levels.get("odor_L", 0.0) + levels.get("odor_R", 0.0))
+        li = (levels.get("light_L", 0.0) + levels.get("light_R", 0.0))
+        m_fwd += self.MOTIV_LIGHT_FORWARD * li
+        m_fwd *= (1.0 - min(1.0, dgr * 1.4))                      # no foraging in danger
+        m_fwd *= (1.0 - min(1.0, levels.get("taste_sugar", 0.0)))# stop when feeding
+        # arrest near the source: slow down as odour peaks (local search gait)
+        m_fwd *= (1.0 - 0.55 * min(1.0, 0.5 * (levels.get("odor_L", 0.0) + levels.get("odor_R", 0.0))))
+        if m_fwd > 0 and len(self.ch_idx["dn_walk_forward"]):
+            self.net.inject(self.ch_idx["dn_walk_forward"], m_fwd)
+        # orienting: bilateral odor imbalance steers through the turn pools.
+        # Klinotaxis done properly (SIMULATION APPROXIMATION of the real
+        # Berg/Brown-style strategy): while the odour level is RISING the fly
+        # goes almost straight (no reason to turn); when FALLING, the full
+        # differential steers it back — this converges instead of orbiting.
+        oL, oR = levels.get("odor_L", 0.0), levels.get("odor_R", 0.0)
+        o_avg = 0.5 * (oL + oR)
+        if self.t_ms - self._odor_mem_t >= 200:
+            self._odor_delta = o_avg - self._odor_mem
+            self._odor_mem = o_avg
+            self._odor_mem_t = self.t_ms
+        rising = max(0.0, self._odor_delta * 5.0)
+        turn_gate = float(np.clip(1.0 - 2.5 * rising, 0.15, 1.0))
+        l_diff = levels.get("light_L", 0.0) - levels.get("light_R", 0.0)
+        steer = self.MOTIV_TURN * ((oL - oR) * turn_gate + 0.5 * l_diff)
+        # plus a slow spontaneous-exploration wobble, suppressed on a strong
+        # gradient (Lévy-ish search when lost; tight tracking when on scent)
+        steer += self.MOTIV_WANDER * (1.0 - min(1.0, o_avg * 1.3)) * \
+            np.sin(self.t_ms / 2600.0 + 1.7 * np.sin(self.t_ms / 910.0))
+        # danger: strong alternating reorientation turns while backing away
+        # (real flies: backward burst + body turn, then forward escape)
+        if dgr > 0:
+            steer += 18.0 * dgr * (1.0 if (self.t_ms // 700) % 2 == 0 else -1.0)
+        steer *= (1.0 - min(1.0, levels.get("taste_sugar", 0.0)))
+        if abs(steer) > 0.01:
+            pool = self.ch_idx["dn_turn"]
+            if len(pool):
+                sideL = self.con.side[pool] == self.con.books["side"].index("left")
+                tgt = pool[sideL] if steer > 0 else pool[~sideL]
+                if len(tgt):
+                    self.net.inject(tgt, abs(steer))
         # hunger rises over time, resets when eating
         self.hunger = min(1.0, self.hunger + 0.00002)
         if self.last_levels.get("taste_sugar", 0) > 0.3:
@@ -106,7 +187,7 @@ class Simulation:
     # ------------------------------------------------------------------
     def step(self, n: int = 1) -> None:
         for _ in range(n):
-            self.apply_sensory()
+            self.apply_sensory(self.t_ms)
             self.net.step(self.net.DT_MS)
             self.t_ms += 1
             self.spikes_since_snapshot += int(self.net.spikes.sum())

@@ -40,8 +40,11 @@ class SensoryEncoder:
         od_b = float(np.sqrt(w.odor_at(b.pos, kind="danger")))
         odor_side = w.odor_angle(b.pos, b.yaw, kind="food")
         split = 0.5 + 0.5 * (np.sin(odor_side) if odor_side is not None else 0.0)
-        L["odor_L"] = min(1.0, od_l * (1.0 + 0.6 * (1 - split)))
-        L["odor_R"] = min(1.0, od_l * (1.0 + 0.6 * split))
+        # lateralise like the antennae: food to the LEFT (bearing > 0, CCW)
+        # reads STRONGER on the left ORN set — the previous assignment was
+        # anatomically flipped and produced repulsion instead of attraction
+        L["odor_L"] = min(1.0, od_l * (1.0 + 0.6 * split))
+        L["odor_R"] = min(1.0, od_l * (1.0 + 0.6 * (1.0 - split)))
         # aversive odour rides on the same ORN set, encoded via "danger" tag —
         # bitter is also routed through taste when contacted
         L["_danger_odor"] = od_b
