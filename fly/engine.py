@@ -59,6 +59,9 @@ class Simulation:
         self.last_cmd: dict = {}
         # stimulation requests (user-triggered)
         self._stim_targets: list[tuple[int, float]] = []
+        # grooming reflex bookkeeping (post-ingestive fixed action pattern)
+        self._was_feeding = False
+        self.groom_timer = 0.0
         # klinotaxis odour memory (motivational APPROXIMATION state)
         self._odor_mem = 0.0
         self._odor_mem_t = 0
@@ -233,6 +236,22 @@ class Simulation:
         if self.body.flying:
             cmd["fly"] = max(cmd["fly"],
                              0.5 + 0.25 * min(1.0, self.body.speed / 200.0))
+        # post-ingestive grooming: when a feeding bout ends, flies run a
+        # stereotyped foreleg/head-cleaning sequence (real fixed action
+        # pattern — here it is a state-triggered reflex, not an animation
+        # loop; locomotion is suppressed for the ~2.4 s bout)
+        if self.body.feed_timer > 0.7:
+            self._was_feeding = True
+        if self._was_feeding and self.body.feed_timer <= 0.05:
+            self._was_feeding = False
+            self.groom_timer = 2.4
+            self.events.append("post-ingestive grooming bout (fixed action pattern — APPROXIMATION)")
+        if self.groom_timer > 0:
+            self.groom_timer = max(0.0, self.groom_timer - n / 1000.0)
+            cmd["walk"] *= 0.08
+            cmd["backward"] = cmd.get("backward", 0.0) * 0.08
+            cmd["yaw"] *= 0.12
+            cmd["fly"] = min(cmd.get("fly", 0.0), 0.05)
         self.last_cmd = cmd
         self.body.update(n / 1000.0, cmd)
         self.world.step(n / 1000.0)
@@ -248,7 +267,8 @@ class Simulation:
             sel = np.nonzero(act > 0.05)[0]
         out = dict(
             t_ms=self.t_ms, paused=self.paused,
-            body=self.body.state(), world=self.world.serialise(),
+            body={**self.body.state(), "groom": min(1.0, self.groom_timer / 2.4)},
+            world=self.world.serialise(),
             active_idx=sel.astype(np.int32).tolist(),
             active_val=[round(float(v), 3) for v in act[sel]],
             n_spiking=int(self.net.spikes.sum()),

@@ -60,6 +60,7 @@ export class FlyView {
     this.gait = 0; this.gaitTgt = 0;          // unwrapped continuous gait phase
     this.wing = 0; this.wingTgt = 0;
     this.flyLevel = 0;
+    this.groom = 0; this.groomTgt = 0;        // post-feeding cleaning bout
     this._tLast = 0;
     this._clock = 0;
   }
@@ -218,6 +219,56 @@ export class FlyView {
     }
   }
 
+  // food = a dropped fruit chunk (what these flies actually forage for);
+  // danger = a dark, spiky noxious mound.  The last child is always the
+  // odour halo (kept from before — that's the REAL signalling radius).
+  _buildSource(kind, r) {
+    const m = new THREE.Group();
+    if (kind === "food") {
+      const flesh = new THREE.MeshPhongMaterial({ color: 0xffa747, shininess: 80 });
+      const body = new THREE.Mesh(new THREE.SphereGeometry(2.7, 18, 14), flesh);
+      body.scale.set(1, 0.62, 0.88);
+      body.position.y = 1.55;
+      m.add(body);
+      const lobes = [[1.9, 0.6, 0.9, 1.15, 0xe88f2f], [-1.7, 0.7, -0.8, 0.95, 0xffb35e]];
+      for (const [lx, ly, lz, ls, col] of lobes) {
+        const lobe = new THREE.Mesh(new THREE.SphereGeometry(ls, 12, 10),
+          new THREE.MeshPhongMaterial({ color: col, shininess: 70 }));
+        lobe.position.set(lx, ly + ls * 0.5, lz);
+        m.add(lobe);
+      }
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.22, 0.9, 6),
+        new THREE.MeshPhongMaterial({ color: 0x6f4a1e }));
+      stem.position.set(0.7, 3.2, 0);
+      stem.rotation.z = 0.45;
+      m.add(stem);
+    } else {
+      const mound = new THREE.Mesh(new THREE.SphereGeometry(2.4, 16, 12),
+        new THREE.MeshPhongMaterial({ color: 0x40251f, shininess: 8, flatShading: true }));
+      mound.scale.set(1, 0.5, 1);
+      mound.position.y = 1.05;
+      m.add(mound);
+      const spikeGeo = new THREE.ConeGeometry(0.30, 1.25, 6);
+      const spikeMat = new THREE.MeshPhongMaterial({ color: 0x241210, flatShading: true });
+      for (let k = 0; k < 6; k++) {
+        const sp = new THREE.Mesh(spikeGeo, spikeMat);
+        const a = k / 6 * Math.PI * 2;
+        sp.position.set(Math.cos(a) * 1.15, 1.9, Math.sin(a) * 1.15);
+        sp.rotation.z = Math.cos(a) * 0.5;
+        sp.rotation.x = -Math.sin(a) * 0.5;
+        m.add(sp);
+      }
+    }
+    const halo = new THREE.Mesh(
+      new THREE.CircleGeometry(r * M2U, 40),
+      new THREE.MeshBasicMaterial({
+        color: kind === "food" ? 0xffb347 : 0xa8352b,
+        transparent: true, opacity: 0.06, side: THREE.DoubleSide }));
+    halo.rotation.x = -Math.PI / 2; halo.position.y = 0.04;
+    m.add(halo);
+    return m;
+  }
+
   syncSources(world) {
     const want = world.sources.length;
     while (this.sourceMeshes.length > want) {
@@ -226,24 +277,21 @@ export class FlyView {
     }
     world.sources.forEach((s, i) => {
       let m = this.sourceMeshes[i];
-      const color = s.kind === "food" ? 0xffab4d : 0xa8352b;
+      if (m && m.userData.kind !== s.kind) {   // kind changed in place → rebuild
+        this.worldGroup.remove(m);
+        m = null;
+      }
       if (!m) {
-        m = new THREE.Group();
-        const blob = new THREE.Mesh(
-          new THREE.SphereGeometry(2.4, 16, 16),
-          new THREE.MeshPhongMaterial({ color, shininess: 90 }));
-        blob.position.y = 1.2;
-        const halo = new THREE.Mesh(
-          new THREE.CircleGeometry(s.r * M2U, 40),
-          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.07, side: THREE.DoubleSide }));
-        halo.rotation.x = -Math.PI / 2; halo.position.y = 0.04;
-        m.add(blob); m.add(halo);
+        m = this._buildSource(s.kind, s.r);
+        m.userData.kind = s.kind;
         this.worldGroup.add(m);
-        this.sourceMeshes.push(m);
+        this.sourceMeshes[i] = m;
       }
       m.position.set(s.x * M2U, 0, s.y * M2U);
-      m.children[0].material.color.setHex(color);
-      m.children[0].scale.setScalar(Math.max(0.25, s.amount));
+      m.scale.setScalar(Math.max(0.25, s.amount));
+      // keep the halo radius true to the odour radius, not the amount scale
+      const halo = m.children[m.children.length - 1];
+      halo.scale.setScalar(1 / Math.max(0.25, s.amount));
     });
   }
 
@@ -341,30 +389,54 @@ export class FlyView {
     prob.rotation.z = 2.35;                    // tucked under the head
     model.add(prob);
 
-    // -- legs: 3 segments (coxa/femur/tibia), tripod gait -------------------
+    // -- legs: coxa→femur→tibia→tarsus(+claws), tripod gait -------------------
     // hip rotates about Y (sweep) and X (lift); knee folds the tibia in.
     const legs = [];
     const FEMUR = L * 0.26, TIBIA = L * 0.34;
     const SPREAD = 0.62, FOLD = 0.78;
     const mounts = [L * 0.17, L * 0.02, -L * 0.13];
+    const clawGeo = new THREE.ConeGeometry(L * 0.007, L * 0.055, 5);
     for (const s of [-1, 1]) {
       for (let i = 0; i < 3; i++) {
         const hip = new THREE.Group();
         hip.position.set(mounts[i], -L * 0.075, s * L * 0.15);
+
+        // COXA — short basal segment angled out of the thorax
+        const coxa = new THREE.Mesh(
+          new THREE.CylinderGeometry(L * 0.024, L * 0.018, L * 0.085, 6), legMat);
+        coxa.rotation.x = -s * 1.15;
+        coxa.position.set(0, -L * 0.028, s * L * 0.030);
+        hip.add(coxa);
+
         const femurG = new THREE.Group();
-        const femur = new THREE.Mesh(new THREE.CylinderGeometry(L * 0.018, L * 0.013, FEMUR, 6), legMat);
+        const femur = new THREE.Mesh(
+          new THREE.CylinderGeometry(L * 0.020, L * 0.013, FEMUR, 6), legMat);
         femur.position.y = -FEMUR / 2;
         femurG.add(femur);
         hip.add(femurG);
+
+        // knee joint sphere
         const knee = new THREE.Group();
         knee.position.y = -FEMUR;
-        const tibia = new THREE.Mesh(new THREE.CylinderGeometry(L * 0.010, L * 0.006, TIBIA, 6), legMat);
+        const patella = new THREE.Mesh(new THREE.SphereGeometry(L * 0.021, 8, 6), darker);
+        knee.add(patella);
+
+        const tibia = new THREE.Mesh(
+          new THREE.CylinderGeometry(L * 0.010, L * 0.006, TIBIA, 6), legMat);
         tibia.position.y = -TIBIA / 2;
         knee.add(tibia);
+
+        // tarsus: pad (pulvillus) + two tiny pretarsal claws
         const tarsus = new THREE.Mesh(new THREE.SphereGeometry(L * 0.016, 8, 6), darker);
         tarsus.position.y = -TIBIA;
-        tarsus.scale.set(1.4, 0.5, 1.0);
+        tarsus.scale.set(1.5, 0.5, 1.1);
         knee.add(tarsus);
+        for (const c of [-1, 1]) {
+          const claw = new THREE.Mesh(clawGeo, darker);
+          claw.position.set(c * L * 0.016, -TIBIA - L * 0.008, L * 0.004);
+          claw.rotation.x = Math.PI; claw.rotation.z = c * 0.45;
+          knee.add(claw);
+        }
         femurG.add(knee);
         model.add(hip);
         // tripod gait phasing: (front+rear same side) opposite to (mid same side),
@@ -393,20 +465,56 @@ export class FlyView {
     shape.quadraticCurveTo(-L * 0.66, L * 0.05, -L * 0.54, 0.001);
     shape.quadraticCurveTo(-L * 0.30, -L * 0.05, 0, 0);
     const wingGeo = new THREE.ShapeGeometry(shape, 10);
+    const veinMat = new THREE.MeshBasicMaterial({ color: 0x9db7c4, transparent: true, opacity: 0.55 });
     for (const s of [-1, 1]) {
       const w = new THREE.Mesh(wingGeo, wingMat);
       w.rotation.x = Math.PI / 2;
       w.scale.y = s;
       const pivot = new THREE.Group();
       pivot.add(w);
+      // wing veins — thin struts running the membrane length
+      for (const vOff of [0.02, 0.052, 0.078]) {
+        const vein = new THREE.Mesh(new THREE.BoxGeometry(L * 0.42, 0.008, 0.008), veinMat);
+        vein.position.set(-L * 0.25, 0.006, s * L * vOff * 0.9);
+        vein.rotation.y = s * -0.08;
+        pivot.add(vein);
+      }
       pivot.position.set(L * 0.11, L * 0.185, s * L * 0.045);
       model.add(pivot);
       wings.push({ pivot, side: s });
     }
 
+    // -- halteres (gyroscopic balancing organs — buzz with the wingbeat) ----
+    const hMat = new THREE.MeshPhongMaterial({ color: 0xdad4c0, shininess: 60 });
+    const halteres = [];
+    for (const s of [-1, 1]) {
+      const pivot = new THREE.Group();
+      pivot.position.set(-L * 0.05, L * 0.115, s * L * 0.155);
+      const stalk = new THREE.Mesh(new THREE.CylinderGeometry(L * 0.009, L * 0.007, L * 0.10, 5), dark);
+      stalk.position.set(s * 0, -L * 0.045, s * L * 0.03);
+      stalk.rotation.x = -s * 0.55;
+      pivot.add(stalk);
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(L * 0.024, 8, 6), hMat);
+      knob.position.set(0, -L * 0.085, s * L * 0.058);
+      pivot.add(knob);
+      model.add(pivot);
+      halteres.push({ pivot, side: s });
+    }
+
+    // -- proboscis labella (tasting pads — spread flat when feeding) --------
+    const labMat = new THREE.MeshPhongMaterial({ color: 0x6b4f28, shininess: 40 });
+    const labella = [];
+    for (const s of [-1, 1]) {
+      const pad = new THREE.Mesh(new THREE.SphereGeometry(L * 0.030, 10, 8), labMat);
+      pad.scale.set(0.8, 0.45, 0.7);
+      pad.position.set(s * L * 0.030, -L * 0.168, 0);
+      prob.add(pad);
+      labella.push({ pad, side: s, x0: s * L * 0.030 });
+    }
+
     const bodyY = L * 0.60;                    // origin height above ground
     return { root, model, abdomen, thorax, head, antennae, prob, legs, wings,
-             L, bodyY, FOLD, SPREAD };
+             halteres, labella, L, bodyY, FOLD, SPREAD };
   }
 
   // ---------------------------------------------------------------- frame
@@ -421,6 +529,7 @@ export class FlyView {
     this.speed = b.speed;
     this.flying = b.flying;
     this.feed = b.feed || 0;
+    this.groomTgt = b.groom || 0;
     this.flyLevel += ((b.flying ? 1 : 0) - this.flyLevel) * 0.5;
     // unwrap phases onto the continuous counters
     const unwrap = (cur, t) => cur + ((t - cur) % TAU + 1.5 * TAU) % TAU - Math.PI;
@@ -434,7 +543,9 @@ export class FlyView {
 
   _pose(dt) {
     const f = this.fly;
-    const gaitAmp = 0.16 + 0.84 * Math.min(1, this.speed / 20);   // idle shuffle → full stride
+    this.groom += (this.groomTgt - this.groom) * Math.min(1, dt * 7);
+    const g = this.groom;
+    const gaitAmp = (0.16 + 0.84 * Math.min(1, this.speed / 20)) * (1 - g * 0.92);
     for (const leg of f.legs) {
       const p = this.gait + leg.phase;
       const sweep = 0.62 * gaitAmp * Math.sin(p);
@@ -444,6 +555,22 @@ export class FlyView {
       leg.femurG.rotation.x = -leg.side * (leg.spread - lift * 0.42);
       leg.knee.rotation.x = leg.side * (leg.fold + lift * 0.55);
     }
+    // post-feeding grooming: forelegs up and scrubbing the head/eyes in
+    // alternating strokes (real Drosophila pattern), while standing still
+    if (g > 0.02) {
+      const rubL = Math.sin(this._clock * 15.0);
+      const rubR = Math.sin(this._clock * 15.0 + Math.PI);
+      for (const leg of f.legs) {
+        if (leg.row !== 0) continue;
+        const rub = leg.side < 0 ? rubL : rubR;
+        leg.hip.rotation.y = 0.55 + 0.26 * rub * g;
+        leg.femurG.rotation.x = -leg.side * (0.62 * (1 - g) + 0.20 * g);
+        leg.knee.rotation.x = leg.side * (0.78 * (1 - g) + (2.30 + 0.32 * rub) * g);
+      }
+      // head dips into the forelegs; proboscis half-extended and wiped
+      f.head.rotation.z = -0.34 * g;
+      f.prob.rotation.z = (2.35 - this.feed * 1.9) - 0.45 * g;
+    }
     // wings — folded flat over the back on the ground, out + beating in flight
     const beat = Math.sin(this.wing);
     const out = 0.16 + this.flyLevel * 0.95;
@@ -452,8 +579,18 @@ export class FlyView {
       w.pivot.rotation.x = -w.side * (0.06 + this.flyLevel * (0.55 * beat + 0.25));
       w.pivot.rotation.z = 0;
     }
-    // proboscis
-    f.prob.rotation.z = 2.35 - this.feed * 1.9;
+    // halteres buzz hard in flight, sit still on the ground
+    for (const h of f.halteres || []) {
+      h.pivot.rotation.x = h.side * (0.12 + this.flyLevel * 0.45 * Math.sin(this.wing * 1.9));
+    }
+    // proboscis + labella (groom pose overrides the extension above)
+    if (g <= 0.02) f.prob.rotation.z = 2.35 - this.feed * 1.9;
+    for (const lb of f.labella || []) {
+      lb.pad.position.x = lb.x0 * (1 + 1.5 * this.feed);
+      lb.pad.scale.set(0.8 + 0.6 * this.feed, 0.45, 0.7);
+    }
+    f.head.rotation.z = 0;
+    if (g > 0.02) f.head.rotation.z = -0.34 * g;
     // idle head saccades + antenna sway
     const t = this._clock;
     f.head.rotation.y = 0.10 * Math.sin(t * 0.7) * Math.sin(t * 1.7 + 2.0);
