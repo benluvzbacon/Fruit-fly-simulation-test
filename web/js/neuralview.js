@@ -16,10 +16,10 @@ export class NeuralView {
     this.container = container;
     const w = container.clientWidth || 800, h = container.clientHeight || 600;
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x07090d);
+    this.scene.background = new THREE.Color(0x0b0e15);
     this.camera = new THREE.PerspectiveCamera(55, w / h, 0.1, 3000);
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
     this.scene.add(new THREE.AmbientLight(0xffffff, 1.0));
@@ -41,10 +41,15 @@ export class NeuralView {
     const resp = await fetch("/api/layout");
     if (!resp.ok) throw new Error("layout fetch failed");
     const buf = await resp.arrayBuffer();
-    const nl = new Uint8Array(buf, 0, 1).indexOf(10);
+    // find the header newline — search the first KB, not the first byte
+    // (a 1-byte Uint8Array view here broke parsing 100% of the time → the
+    //  eternal "brain layout failed to load")
+    const nl = new Uint8Array(buf, 0, Math.min(8192, buf.byteLength)).indexOf(10);
+    if (nl < 0) throw new Error("layout header line missing");
     const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 0, nl)));
     const n = header.n;
     let off = nl + 1;
+    if (off % 4 !== 0) throw new Error(`layout unaligned (offset ${off}) — update server.py`);
     this.pos = new Float32Array(buf, off, n * 3); off += n * 12;
     this.sup = new Int16Array(buf, off, n); off += n * 2;
     this.side = new Int16Array(buf, off, n); off += n * 2;
@@ -86,7 +91,7 @@ export class NeuralView {
     this._recolorAll();
     geo.setAttribute("color", new THREE.BufferAttribute(this.colors, 3));
     const mat = new THREE.PointsMaterial({
-      size: 1.1, vertexColors: true, transparent: true, opacity: 0.85,
+      size: 1.8, vertexColors: true, transparent: true, opacity: 0.9,
       sizeAttenuation: true, depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -105,7 +110,7 @@ export class NeuralView {
     this.actGeo.setAttribute("color", new THREE.BufferAttribute(this.actCol, 3));
     this.actGeo.setDrawRange(0, 0);
     this.activePts = new THREE.Points(this.actGeo, new THREE.PointsMaterial({
-      size: 3.2, vertexColors: true, transparent: true, opacity: 0.95,
+      size: 4.6, vertexColors: true, transparent: true, opacity: 0.95,
       sizeAttenuation: true, depthWrite: false, blending: THREE.AdditiveBlending }));
     this.activePts.frustumCulled = false;
     this.scene.add(this.activePts);
@@ -141,7 +146,7 @@ export class NeuralView {
         hex = PALETTE[this.supNames[this.sup[i]]] ?? 0x888888;
       }
       const c = new THREE.Color(hex);
-      this.colors[i * 3] = c.r * 0.55; this.colors[i * 3 + 1] = c.g * 0.55; this.colors[i * 3 + 2] = c.b * 0.55;
+      this.colors[i * 3] = c.r * 0.72; this.colors[i * 3 + 1] = c.g * 0.72; this.colors[i * 3 + 2] = c.b * 0.72;
     }
   }
 

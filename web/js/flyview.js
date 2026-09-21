@@ -25,7 +25,7 @@ export class FlyView {
     this.scene.fog = new THREE.Fog(0x10141b, 260, 640);
     this.camera = new THREE.PerspectiveCamera(55, w / h, 0.05, 2000);
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
 
@@ -45,6 +45,12 @@ export class FlyView {
     this.scene.add(this.worldGroup);
     this.fly = this._buildFly();
     this.scene.add(this.fly.root);
+    // soft blob shadow grounding the fly (cheap — no real shadow maps)
+    this.blobShadow = new THREE.Mesh(
+      new THREE.CircleGeometry(3.4, 24),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.28, depthWrite: false }));
+    this.blobShadow.rotation.x = -Math.PI / 2;
+    this.scene.add(this.blobShadow);
     this._arenaBuilt = false;
 
     // interpolated presentation state (polls arrive ~5×/s; we render at 60 fps)
@@ -58,21 +64,46 @@ export class FlyView {
     this._clock = 0;
   }
 
+  // procedural substrate texture: mottled soil + leaf-litter speckle
+  _floorTexture() {
+    const c = document.createElement("canvas");
+    c.width = c.height = 256;
+    const g = c.getContext("2d");
+    g.fillStyle = "#232a22";
+    g.fillRect(0, 0, 256, 256);
+    for (let i = 0; i < 2600; i++) {
+      const x = Math.random() * 256, y = Math.random() * 256, r = Math.random() * 2.6 + 0.4;
+      const t = Math.random();
+      g.fillStyle = t < 0.55 ? "rgba(46,58,40,0.5)" : t < 0.8 ? "rgba(30,36,28,0.6)" : "rgba(78,66,42,0.4)";
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+    for (let i = 0; i < 220; i++) {       // fine grit
+      g.fillStyle = Math.random() < 0.5 ? "rgba(120,110,70,0.25)" : "rgba(12,16,12,0.35)";
+      g.fillRect(Math.random() * 256, Math.random() * 256, 1.2, 1.2);
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(7, 7);
+    return tex;
+  }
+
   // ---------------------------------------------------------------- world
   buildWorld(world) {
     while (this.worldGroup.children.length) this.worldGroup.remove(this.worldGroup.children[0]);
     if (this._grid) this.scene.remove(this._grid);
     const B = world.bounds;
     const W = (B.x[1] - B.x[0]) * M2U, D = (B.y[1] - B.y[0]) * M2U, H = B.z[1] * M2U;
+    this._W = W; this._D = D;
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(W, D),
-      new THREE.MeshPhongMaterial({ color: 0x1a2027, shininess: 6 }));
+      new THREE.MeshPhongMaterial({ map: this._floorTexture(), color: 0xbfc7b4, shininess: 4 }));
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(B.x[0] * M2U + W / 2, 0, B.y[0] * M2U + D / 2);
     this.worldGroup.add(floor);
-    this._grid = new THREE.GridHelper(W, 30, 0x2c3546, 0x1e2632);
+    this._grid = new THREE.GridHelper(W, 24, 0x39463a, 0x27332a);
     this._grid.position.set(W / 2, 0.02, D / 2);
+    this._grid.material.transparent = true; this._grid.material.opacity = 0.35;
     this.worldGroup.add(this._grid);
 
     const wallMat = new THREE.MeshPhongMaterial({
@@ -87,7 +118,7 @@ export class FlyView {
 
     // obstacles
     const obsGeo = new THREE.CylinderGeometry(1, 1, 1, 24);
-    const obsMat = new THREE.MeshPhongMaterial({ color: 0x3a4654, flatShading: true });
+    const obsMat = new THREE.MeshPhongMaterial({ color: 0x4c5347, flatShading: true });
     this.obstacleMeshes = world.obstacles.map(([cx, cy, r, h]) => {
       const m = new THREE.Mesh(obsGeo, obsMat);
       m.scale.set(r * M2U, h * M2U, r * M2U);
@@ -96,7 +127,7 @@ export class FlyView {
       return m;
     });
 
-    // light marker
+    // light marker + volumetric-ish glow cone down to the floor
     const L = world.light;
     const sunBall = new THREE.Mesh(
       new THREE.SphereGeometry(4.5, 20, 20),
@@ -104,6 +135,16 @@ export class FlyView {
     sunBall.position.set(L.x * M2U, L.z * M2U, L.y * M2U);
     this.worldGroup.add(sunBall);
     this.sunMesh = sunBall;
+    const coneH = L.z * M2U;
+    this.lampCone = new THREE.Mesh(
+      new THREE.ConeGeometry(coneH * 0.55, coneH, 32, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xfff0b8, transparent: true,
+        opacity: 0.07, side: THREE.DoubleSide, depthWrite: false,
+        blending: THREE.AdditiveBlending }));
+    this.lampCone.rotation.x = Math.PI;          // apex up at the lamp
+    this.lampCone.position.set(L.x * M2U, coneH / 2, L.y * M2U);
+    this.worldGroup.add(this.lampCone);
+    this._scatterDetails(W, D, world);
 
     // heat zone
     const hz = new THREE.Mesh(
@@ -118,6 +159,65 @@ export class FlyView {
     this.orbit.cx = this.cur.pos.x; this.orbit.cz = this.cur.pos.z;
   }
 
+  // cheap dressing: pebbles, grass tufts, fallen leaves — static instanced/
+  // small meshes so it costs almost nothing per frame
+  _scatterDetails(W, D, world) {
+    const rng = (a, b) => a + Math.random() * (b - a);
+    const away = (x, z, r) => world.obstacles.some(([cx, cy, or]) =>
+      Math.hypot(x - cx * M2U, z - cy * M2U) < (or * M2U + r));
+
+    // pebbles
+    const pebGeo = new THREE.IcosahedronGeometry(1, 0);
+    const pebMat = new THREE.MeshPhongMaterial({ color: 0x6b6f66, flatShading: true });
+    const peb = new THREE.InstancedMesh(pebGeo, pebMat, 42);
+    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+    let n = 0;
+    for (let i = 0; i < 120 && n < 42; i++) {
+      const x = rng(4, W - 4), z = rng(4, D - 4);
+      if (away(x, z, 3)) continue;
+      const s = rng(0.35, 1.5);
+      q.setFromEuler(new THREE.Euler(rng(0, 3), rng(0, 3), rng(0, 3)));
+      m4.compose(new THREE.Vector3(x, s * 0.35, z), q, sc.set(s, s * rng(0.4, 0.7), s));
+      peb.setMatrixAt(n++, m4);
+    }
+    peb.count = n; peb.instanceMatrix.needsUpdate = true;
+    this.worldGroup.add(peb);
+
+    // grass tufts — two crossed blades each
+    const bladeMat = new THREE.MeshPhongMaterial({ color: 0x3f6b35,
+      side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+    const bladeGeo = new THREE.PlaneGeometry(0.9, 2.6);
+    bladeGeo.translate(0, 1.3, 0);
+    for (let i = 0; i < 26; i++) {
+      const x = rng(5, W - 5), z = rng(5, D - 5);
+      if (away(x, z, 2.5)) continue;
+      const tuft = new THREE.Group();
+      for (let k = 0; k < 3; k++) {
+        const b = new THREE.Mesh(bladeGeo, bladeMat);
+        b.rotation.y = k * Math.PI / 3 + rng(0, 0.6);
+        b.rotation.z = rng(-0.22, 0.22);
+        b.scale.setScalar(rng(0.7, 1.5));
+        tuft.add(b);
+      }
+      tuft.position.set(x, 0, z);
+      this.worldGroup.add(tuft);
+    }
+
+    // fallen leaves
+    const leafMat = new THREE.MeshPhongMaterial({ color: 0x5d4a26,
+      side: THREE.DoubleSide, shininess: 8 });
+    for (let i = 0; i < 5; i++) {
+      const leaf = new THREE.Mesh(new THREE.CircleGeometry(rng(2.2, 4.2), 9), leafMat);
+      leaf.rotation.x = -Math.PI / 2 + rng(-0.12, 0.12);
+      leaf.rotation.z = rng(0, 6.3);
+      leaf.scale.set(1, rng(0.55, 0.75), 1);
+      const x = rng(8, W - 8), z = rng(8, D - 8);
+      if (away(x, z, 3)) continue;
+      leaf.position.set(x, 0.06, z);
+      this.worldGroup.add(leaf);
+    }
+  }
+
   syncSources(world) {
     const want = world.sources.length;
     while (this.sourceMeshes.length > want) {
@@ -126,7 +226,7 @@ export class FlyView {
     }
     world.sources.forEach((s, i) => {
       let m = this.sourceMeshes[i];
-      const color = s.kind === "food" ? 0x59ffa3 : 0xff5b4d;
+      const color = s.kind === "food" ? 0xffab4d : 0xa8352b;
       if (!m) {
         m = new THREE.Group();
         const blob = new THREE.Mesh(
@@ -328,6 +428,7 @@ export class FlyView {
     this.wingTgt = unwrap(this.wing, b.wing_phase);
     this.firstFrameSeen = true;
     this.sunMesh.material.color.setHex(frame.world.light.on ? 0xffe58a : 0x4a4633);
+    if (this.lampCone) this.lampCone.material.opacity = frame.world.light.on ? 0.07 : 0.0;
     this.syncSources(frame.world);
   }
 
@@ -425,6 +526,11 @@ export class FlyView {
     g.position.copy(this.cur.pos);
     g.rotation.set(0, -this.cur.yaw, 0, "YXZ");
     this._pose(dt);
+    // blob shadow tracks the fly, thinning with altitude
+    const h = Math.max(0, this.cur.pos.y - this.fly.bodyY);
+    this.blobShadow.position.set(this.cur.pos.x, 0.05, this.cur.pos.z);
+    this.blobShadow.material.opacity = 0.28 / (1 + h * 0.12);
+    this.blobShadow.scale.setScalar(1 + h * 0.02);
 
     // camera follow
     const o = this.orbit;

@@ -124,6 +124,9 @@ class SimRunner(threading.Thread):
             sim.events.append("cleared all odor/taste sources")
         elif a == "set_hunger":
             sim.hunger = float(np.clip(b.get("value", 0.5), 0.0, 1.0))
+        elif a == "set_duty":
+            RUNNER.duty = float(np.clip(b.get("value", 0.55), 0.15, 0.95))
+            sim.events.append(f"brain duty → {RUNNER.duty:.2f}")
         elif a == "teleport_fly":
             sim.body.pos = np.array([float(b["x"]), float(b["y"]), float(b.get("z", 0))], dtype=np.float32)
             sim.events.append(f"fly teleported to ({b['x']:.0f}, {b['y']:.0f})")

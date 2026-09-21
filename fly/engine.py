@@ -27,7 +27,7 @@ class Simulation:
     BG_STD = 1.0           # background drive spread
     MOTIV_FORWARD = 3.2    # hunger-gated foraging drive onto DNa forward pool
     MOTIV_ODOR_FORWARD = 4.5   # extra forward drive proportional to food odor
-    MOTIV_LIGHT_FORWARD = 1.6  # mild phototaxis onto forward pool
+    MOTIV_LIGHT_FORWARD = 0.8  # mild phototaxis onto forward pool
     MOTIV_TURN = 26.0      # bilateral imbalance → turn-pool steering
                        # (calibrated vs decoder: 8+ units for a real turn)
     MOTIV_WANDER = 6.0     # spontaneous search-pattern wobble
@@ -142,6 +142,16 @@ class Simulation:
         m_fwd *= (1.0 - min(1.0, levels.get("taste_sugar", 0.0)))# stop when feeding
         # arrest near the source: slow down as odour peaks (local search gait)
         m_fwd *= (1.0 - 0.55 * min(1.0, 0.5 * (levels.get("odor_L", 0.0) + levels.get("odor_R", 0.0))))
+        # arrival under the lamp: stop pressing forward into the wall below it
+        m_fwd *= (1.0 - 0.55 * min(1.0, li))
+        # wall-contact reflex (SIMULATION APPROXIMATION of touch-evoked
+        # escape-turning): without this the fly noses into a corner and the
+        # constant forward drive pins it there forever
+        touching = levels.get("mechanosensory", 0.0) >= 0.5
+        if touching:
+            m_fwd *= 0.05
+            if len(self.ch_idx["dn_walk_backward"]):
+                self.net.inject(self.ch_idx["dn_walk_backward"], 16.0)
         if m_fwd > 0 and len(self.ch_idx["dn_walk_forward"]):
             self.net.inject(self.ch_idx["dn_walk_forward"], m_fwd)
         # orienting: bilateral odor imbalance steers through the turn pools.
@@ -167,6 +177,16 @@ class Simulation:
         # (real flies: backward burst + body turn, then forward escape)
         if dgr > 0:
             steer += 18.0 * dgr * (1.0 if (self.t_ms // 700) % 2 == 0 else -1.0)
+        # wall-contact: spin-scan while backing out of the corner
+        if touching:
+            steer += 20.0 * (1.0 if (self.t_ms // 900) % 2 == 0 else -1.0)
+        # bold spontaneous reorientations: every ~9 s commit a ~1.2 s turn in
+        # alternating directions (real walking flies make sharp turn bouts;
+        # keeps the search from funnelling into one corner)
+        elif o_avg < 0.4 and levels.get("taste_sugar", 0) < 0.2:
+            cyc = self.t_ms // 9000
+            if self.t_ms % 9000 < 1300:
+                steer += 11.0 * (1.0 if cyc % 2 == 0 else -1.0)
         steer *= (1.0 - min(1.0, levels.get("taste_sugar", 0.0)))
         if abs(steer) > 0.01:
             pool = self.ch_idx["dn_turn"]

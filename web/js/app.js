@@ -55,8 +55,16 @@ async function setMode(m) {
     ? "NORMAL VIEW — the fly in its world"
     : "NEURAL VIEW — the real FlyWire brain (139,255 neurons from v783)";
   if (m === "neural" && !neuralView.loaded) {
-    try { await neuralView.load(); }
-    catch (e) { window.__errlog?.("brain layout failed to load: " + (e.message || e)); }
+    $("#view-label").textContent = "NEURAL VIEW — loading real brain layout…";
+    try {
+      await neuralView.load();
+      $("#view-label").textContent =
+        `NEURAL VIEW — REAL FlyWire brain · ${neuralView.n.toLocaleString()} neurons`;
+    } catch (e) {
+      window.__errlog?.("brain layout failed to load: " + (e.message || e));
+      $("#view-label").textContent = "NEURAL VIEW — failed to load (see error box, bottom left)";
+      return;
+    }
   }
   resize();
 }
@@ -192,6 +200,7 @@ $("#btn-sugar").onclick = () => api("/api/command", { action: "drop_food", x: la
 $("#btn-bitter").onclick = () => api("/api/command", { action: "drop_bitter", x: lastBody[0], y: lastBody[1] });
 $("#btn-clear").onclick = () => api("/api/command", { action: "clear_sources" });
 $("#hunger").oninput = e => api("/api/command", { action: "set_hunger", value: parseFloat(e.target.value) });
+$("#duty").oninput = e => api("/api/command", { action: "set_duty", value: parseFloat(e.target.value) });
 $("#stim-btn").onclick = () => { const r = parseInt($("#stim-root").value); if (r) window.__stim(r); };
 $("#tp-btn").onclick = () => {
   const x = parseFloat($("#tp-x").value), y = parseFloat($("#tp-y").value);
