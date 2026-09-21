@@ -277,9 +277,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps(out, default=str), "application/json")
             except Exception as e:  # noqa: BLE001
                 return self._send(500, json.dumps({"error": repr(e)}), "application/json")
-        # static viewer files
-        safe = os.path.normpath(u.path).lstrip("/")
-        if safe.startswith(".."):
+        # static viewer files — resolve the URL path WITHOUT platform
+        # surprises: os.path.normpath("/a/b") on Windows yields "\\a\\b",
+        # whose backslash survives lstrip("/") and then anchors the path
+        # outside the web root (the 404-on-Windows bug).  Strip the leading
+        # slash FIRST, then rebuild from /-separated components.
+        rel = u.path.lstrip("/")
+        if "\\" in rel or rel.startswith("..") or "/../" in rel:
+            return self._send(403, "forbidden")
+        safe = os.path.join(*rel.split("/")) if rel else "index.html"
+        full = os.path.join(WEB, safe)
+        if os.path.commonpath((os.path.abspath(full), WEB)) != WEB:
             return self._send(403, "forbidden")
         return self._file(safe)
 
